@@ -1,0 +1,25 @@
+[package]
+name = "reiy"
+edition = "2024.beta"
+version = "0.1.0"
+license = "MIT"
+
+[dependencies]
+# DeepBook v3 — pinned to the mainnet revision (do NOT use rev = "main"; mainnet builds must be reproducible).
+deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "663edbf9c30d6c93100e6cd66936e1487a5dc9e0" }
+
+[addresses]
+reiy = "0x0"
+
+# Per-environment configuration. DeepBook is published at different package IDs on each network,
+# so build/publish under the matching environment:
+#   sui move build --build-env mainnet
+#   sui move build --build-env testnet
+# The resolved published-at addresses for each environment are tracked per-env in Move.lock.
+[environments]
+mainnet = "35834a8a"
+testnet = "4c78adac"
+
+[dev-dependencies]
+
+[dev-addresses]
