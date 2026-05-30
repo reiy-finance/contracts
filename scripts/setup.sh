@@ -64,19 +64,29 @@ sui client ptb \
     "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
   --gas-budget "${GAS_BUDGET}"
 
-# ---- 3. add_numeraire_pool per buy token that needs normalization ----
-# DEEPBOOK_SUI_USDC_POOL maps SUI -> USDC numeraire direction.
+# ---- 3. add_numeraire_pool per token that needs normalization ----
 # Pattern: add_numeraire_pool<Token>(config, pool_id, cap)
-if [[ -n "${DEEPBOOK_SUI_USDC_POOL:-}" ]]; then
-  echo ""
-  echo "Step 3: add_numeraire_pool for SUI -> USDC pool: $DEEPBOOK_SUI_USDC_POOL ..."
+add_numeraire_pool_if_set() {
+  local token_label=$1
+  local token_type=$2
+  local pool_id=$3
+
+  if [[ -z "$token_type" || -z "$pool_id" ]]; then
+    echo "  Skipping ${token_label}: token type or pool id not set"
+    return
+  fi
+
+  echo "  Adding numeraire pool for ${token_label}: ${pool_id}"
   sui client ptb \
-    --move-call "${REIY_PACKAGE_ID}::config::add_numeraire_pool<0x2::sui::SUI>" \
-      "@${GLOBAL_CONFIG_ID}" "@${DEEPBOOK_SUI_USDC_POOL}" "@${ADMIN_CAP_ID}" \
+    --move-call "${REIY_PACKAGE_ID}::config::add_numeraire_pool<${token_type}>" \
+      "@${GLOBAL_CONFIG_ID}" "@${pool_id}" "@${ADMIN_CAP_ID}" \
     --gas-budget "${GAS_BUDGET}"
-else
-  echo "Step 3: DEEPBOOK_SUI_USDC_POOL not set — skipping"
-fi
+}
+
+echo ""
+echo "Step 3: add_numeraire_pool ..."
+add_numeraire_pool_if_set "WSUI -> WUSDC" "${WSUI_TYPE:-}" "${DEEPBOOK_WSUI_WUSDC_POOL:-}"
+add_numeraire_pool_if_set "WDEEP -> WUSDC" "${WDEEP_TYPE:-}" "${DEEPBOOK_WDEEP_WUSDC_POOL:-}"
 
 # ---- 4. add_supported_pairs ----
 echo ""
@@ -85,11 +95,23 @@ if [[ -z "${SUPPORTED_PAIRS:-}" ]]; then
   echo "SUPPORTED_PAIRS not set — skipping"
 else
   for PAIR in $SUPPORTED_PAIRS; do
-    SELL=$(echo "$PAIR" | cut -d: -f1,2,3)   # e.g. 0x2::sui::SUI
-    BUY=$(echo "$PAIR"  | rev | cut -d: -f1,2,3 | rev)  # trailing after last delim set
-    # Re-split by the literal ":" separator between the two types
-    SELL=$(echo "$PAIR" | python3 -c "import sys; p=sys.stdin.read().strip().split(':'); print(':'.join(p[:3]))")
-    BUY=$(echo "$PAIR"  | python3 -c "import sys; p=sys.stdin.read().strip().split(':'); print(':'.join(p[3:]))")
+    if [[ "$PAIR" == *"|"* ]]; then
+      SELL=${PAIR%%|*}
+      BUY=${PAIR#*|}
+    elif [[ "$PAIR" == *":0x"* ]]; then
+      SELL=${PAIR%%:0x*}
+      BUY=0x${PAIR#*:0x}
+    else
+      echo "ERROR: unsupported pair format: $PAIR" >&2
+      echo "Use SELL_TYPE:BUY_TYPE or SELL_TYPE|BUY_TYPE" >&2
+      exit 1
+    fi
+
+    if [[ -z "$SELL" || -z "$BUY" || "$SELL" == "$BUY" ]]; then
+      echo "ERROR: could not parse supported pair: $PAIR" >&2
+      exit 1
+    fi
+
     echo "  Adding pair: ${SELL} -> ${BUY}"
     sui client ptb \
       --move-call "${REIY_PACKAGE_ID}::config::add_supported_pair<${SELL},${BUY}>" \

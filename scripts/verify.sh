@@ -15,7 +15,7 @@ check_object() {
     return
   fi
   local typ
-  typ=$(sui client object "$id" --json 2>/dev/null | jq -r '.data.type // empty')
+  typ=$(sui client object "$id" --json 2>/dev/null | jq -r '.data.type // .objType // empty')
   if echo "$typ" | grep -q "$pattern"; then
     echo "  ✓  $label  $id"
     ((ok++)) || true

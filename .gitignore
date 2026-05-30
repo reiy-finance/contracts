@@ -3,3 +3,7 @@ traces/*
 .trace
 .coverage*
 Pub.*.toml
+.env.testnet
+.env.mainnet
+.env
+.env.local

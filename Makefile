@@ -147,7 +147,6 @@ deploy-testnet: build _env-testnet-check
 	@sui client switch --env testnet
 	@echo "Publishing REIY to testnet..."
 	sui client publish $(PACKAGE_PATH) \
-		--build-env testnet \
 		--gas-budget $(GAS_TESTNET) \
 		$(PUBLISH_FLAGS) \
 		--json > $(TMP_TESTNET)
@@ -175,7 +174,6 @@ deploy-mainnet: build-mainnet _env-mainnet-check _confirm-mainnet
 	@sui client switch --env mainnet
 	@echo "Publishing REIY to MAINNET..."
 	sui client publish $(PACKAGE_PATH) \
-		--build-env mainnet \
 		--gas-budget $(GAS_MAINNET) \
 		$(PUBLISH_FLAGS) \
 		--json > $(TMP_MAINNET)
