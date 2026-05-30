@@ -78,6 +78,7 @@ public struct IntentMeta has copy, drop, store {
     min_amount_out: u64,
     sell_amount: u64,
     partial_fillable: bool,
+    deadline: u64,
 }
 
 /// An executable settlement plan submitted by a solver during the Bid phase.
@@ -344,7 +345,7 @@ fun submit_intent_inner<Sell, Buy>(
         clock,
         ctx,
     );
-    record_intent_meta(state, id, pair, min_amount_out, sell_amount, partial_fillable);
+    record_intent_meta(state, id, pair, min_amount_out, sell_amount, partial_fillable, deadline);
     id
 }
 
@@ -355,11 +356,12 @@ fun record_intent_meta(
     min_amount_out: u64,
     sell_amount: u64,
     partial_fillable: bool,
+    deadline: u64,
 ) {
     state.batch.insert(id);
     state
         .intent_meta
-        .insert(id, IntentMeta { pair, min_amount_out, sell_amount, partial_fillable });
+        .insert(id, IntentMeta { pair, min_amount_out, sell_amount, partial_fillable, deadline });
 }
 
 // === Intent cancel / update ===
@@ -947,15 +949,16 @@ public(package) fun requeue_intent(
     min_amount_out: u64,
     sell_amount: u64,
     partial_fillable: bool,
+    deadline: u64,
 ) {
     if (!state.requeued.contains(&id)) {
         state.requeued.insert(id);
         state
             .requeue_meta
-            .insert(id, IntentMeta { pair, min_amount_out, sell_amount, partial_fillable });
+            .insert(id, IntentMeta { pair, min_amount_out, sell_amount, partial_fillable, deadline });
     } else {
         let m = state.requeue_meta.get_mut(&id);
-        *m = IntentMeta { pair, min_amount_out, sell_amount, partial_fillable };
+        *m = IntentMeta { pair, min_amount_out, sell_amount, partial_fillable, deadline };
     };
 }
 
@@ -985,9 +988,9 @@ public(package) fun all_winners_settled(state: &AuctionState): bool {
     state.intent_settled.length() >= state.winner_intents.length()
 }
 
-public(package) fun intent_meta_of(state: &AuctionState, id: &ID): (PairKey, u64, u64, bool) {
+public(package) fun intent_meta_of(state: &AuctionState, id: &ID): (PairKey, u64, u64, bool, u64) {
     let m = state.intent_meta.get(id);
-    (m.pair, m.min_amount_out, m.sell_amount, m.partial_fillable)
+    (m.pair, m.min_amount_out, m.sell_amount, m.partial_fillable, m.deadline)
 }
 
 public(package) fun has_intent_meta(state: &AuctionState, id: &ID): bool {

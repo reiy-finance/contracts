@@ -35,7 +35,7 @@ const ENotOwner: vector<u8> = b"caller is not the intent owner";
 #[error]
 const ENotPartialFillable: vector<u8> = b"intent is not partial-fillable";
 #[error]
-const EFillExceedsRemaining: vector<u8> = b"fill amount exceeds remaining balance";
+const EFillNotStrictlyPartial: vector<u8> = b"partial fill must be strictly less than remaining; use full settle for the final fill";
 #[error]
 const EZeroFill: vector<u8> = b"fill amount must be > 0";
 
@@ -189,7 +189,9 @@ public(package) fun consume_intent_partial<Sell, Buy>(
 ): (address, Balance<Sell>, u64) {
     assert!(intent.partial_fillable, ENotPartialFillable);
     assert!(fill_amount > 0, EZeroFill);
-    assert!(fill_amount <= intent.sell_balance.value(), EFillExceedsRemaining);
+    // strictly less than remaining: a fill that consumes the whole balance must go through the
+    // full-consume path (which deletes the object), so a partial can never leave a zombie at zero.
+    assert!(fill_amount < intent.sell_balance.value(), EFillNotStrictlyPartial);
     // m_i(f_i) = ceil(m_i * f / x_i) — uses original sell amount so each partial is comparable
     let m_eff = math::mul_div_ceil(
         intent.original_min_amount_out,
@@ -199,8 +201,7 @@ public(package) fun consume_intent_partial<Sell, Buy>(
     let split = intent.sell_balance.split(fill_amount);
     intent.filled_amount = intent.filled_amount + fill_amount;
     intent.target_epoch = intent.target_epoch + 1;
-    intent.fill_status = if (intent.sell_balance.value() == 0) FillStatus::Filled
-    else FillStatus::PartialFill;
+    intent.fill_status = FillStatus::PartialFill;
     (intent.owner, split, m_eff)
 }
 

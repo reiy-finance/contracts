@@ -127,6 +127,7 @@ public fun take_intent_partial<Sell, Buy>(
         intent.original_min_amount_out(),
         intent.original_sell_amount(),
         intent.partial_fillable(),
+        intent.deadline(),
     );
 
     let receipt = SettlementReceipt<Sell, Buy> {
@@ -296,11 +297,12 @@ fun finalize_settlement_normalized<Sell, Buy>(
 
 /// Close the batch: dual verification (score + per-pair k), fee collection, and reward distribution.
 /// All winning intents must be settled before calling.
+#[allow(lint(self_transfer))]
 public fun close_batch<N>(
     state: &mut AuctionState,
     config: &GlobalConfig,
     treasury: &mut ProtocolTreasury<N>,
-    fee: Coin<N>,
+    mut fee: Coin<N>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -333,7 +335,14 @@ public fun close_batch<N>(
 
     let required_fee = math::mul_div_floor(value_sum, config.protocol_fee_bps(), math::bps_denom());
     assert!(fee.value() >= required_fee, EFeeTooSmall);
-    treasury::deposit_fee(treasury, fee, epoch);
+    // deposit only the required fee; refund any overpayment to the caller
+    let exact = fee.split(required_fee, ctx);
+    treasury::deposit_fee(treasury, exact, epoch);
+    if (fee.value() > 0) {
+        transfer::public_transfer(fee, ctx.sender());
+    } else {
+        fee.destroy_zero();
+    };
 
     distribute_rewards(state, config, treasury, actual_score, value_sum, ctx);
 
@@ -383,8 +392,10 @@ fun distribute_rewards<N>(
 
 // === Fallback ===
 
-/// Permissionless slashing after the settlement deadline: slashes unsettled solver bonds,
-/// re-queues their intents, and moves the epoch to Failed.
+/// Permissionless fallback after the settlement deadline. A solver is slashed only for intents that
+/// were still settleable (not expired) yet left unsettled — i.e. genuine solver fault. Intents that
+/// expired before settlement are neither slashed nor re-queued; the owner reclaims them via cancel.
+/// Still-valid unsettled intents are re-queued for the next epoch. The epoch moves to Failed.
 #[allow(lint(self_transfer))]
 public fun trigger_fallback(
     state: &mut AuctionState,
@@ -394,7 +405,8 @@ public fun trigger_fallback(
     ctx: &mut TxContext,
 ) {
     auction::assert_settlement_phase(state);
-    assert!(clock.timestamp_ms() > auction::settlement_deadline_ms(state), ETooEarly);
+    let now = clock.timestamp_ms();
+    assert!(now > auction::settlement_deadline_ms(state), ETooEarly);
 
     let ids = auction::winner_intent_ids(state);
     let mut slashed = sui::balance::zero<SUI>();
@@ -404,27 +416,28 @@ public fun trigger_fallback(
     let n = ids.length();
     while (i < n) {
         let id = ids[i];
-        if (!auction::is_intent_settled(state, &id)) {
-            let solver = auction::solver_of_intent(state, &id);
-            if (
-                !slashed_solvers.contains(&solver) && solver_registry::is_registered(registry, solver)
-            ) {
-                slashed_solvers.insert(solver);
-                let amount = solver_registry::bond_of(registry, solver);
-                if (amount > 0) {
-                    let b = solver_registry::slash(
-                        registry,
-                        solver,
-                        amount,
-                        solver_registry::reason_timeout(),
-                        ctx,
-                    );
-                    slashed.join(b);
+        if (!auction::is_intent_settled(state, &id) && auction::has_intent_meta(state, &id)) {
+            let (pair, min_out, sell_amount, partial, deadline) = auction::intent_meta_of(state, &id);
+            // Expired intents were impossible to settle: do not slash, do not re-queue.
+            if (now <= deadline) {
+                let solver = auction::solver_of_intent(state, &id);
+                if (
+                    !slashed_solvers.contains(&solver) && solver_registry::is_registered(registry, solver)
+                ) {
+                    slashed_solvers.insert(solver);
+                    let amount = solver_registry::bond_of(registry, solver);
+                    if (amount > 0) {
+                        let b = solver_registry::slash(
+                            registry,
+                            solver,
+                            amount,
+                            solver_registry::reason_timeout(),
+                            ctx,
+                        );
+                        slashed.join(b);
+                    };
                 };
-            };
-            if (auction::has_intent_meta(state, &id)) {
-                let (pair, min_out, sell_amount, partial) = auction::intent_meta_of(state, &id);
-                auction::requeue_intent(state, id, pair, min_out, sell_amount, partial);
+                auction::requeue_intent(state, id, pair, min_out, sell_amount, partial, deadline);
             };
         };
         i = i + 1;

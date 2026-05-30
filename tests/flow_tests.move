@@ -8,7 +8,7 @@ use sui::clock::Clock;
 use sui::test_scenario::{Self as ts, Scenario};
 use reiy::config::GlobalConfig;
 use reiy::auction::{Self, AuctionState};
-use reiy::intent_book::Intent;
+use reiy::intent_book::{Self, Intent};
 use reiy::solver_registry::{Self as reg, SolverRegistry};
 use reiy::treasury::ProtocolTreasury;
 use reiy::settlement;
@@ -232,6 +232,258 @@ fun drive_to_settlement(sc: &mut Scenario, clock: &mut Clock): (ID, ID) {
     ts::next_tx(sc, ADMIN);
     advance(sc, clock);
     (id1, id2)
+}
+
+// === Double partial-take of the same intent must revert (F-1 verification) ===
+// take_intent_partial does not mark the intent settled, so a solver can take the same intent
+// twice before settling. But both receipts are hot potatoes that must be consumed, and the
+// second settle re-inserts the intent id into the `intent_settled` VecSet, which aborts on the
+// duplicate key. The whole PTB therefore reverts — no double-count is ever committed.
+#[test]
+#[expected_failure]
+fun test_double_partial_settle_same_intent_reverts() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let (id1, _id2) = drive_to_settlement(&mut sc, &mut clock);
+
+    ts::next_tx(&mut sc, SOLVER);
+    let mut state = ts::take_shared<AuctionState>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+    let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+    let mut intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id1);
+
+    // id1: sell 1000, floor 2090 (= max(m_eff 1900, benchmark 2090))
+    let (c1, r1) = settlement::take_intent_partial(&mut state, &mut intent, 400, &clock, ts::ctx(&mut sc));
+    // second take BEFORE any settle — guard `!is_intent_settled` still passes
+    let (c2, r2) = settlement::take_intent_partial(&mut state, &mut intent, 400, &clock, ts::ctx(&mut sc));
+    // first settle marks id1 settled
+    settlement::settle_intent_numeraire(&mut state, &mut registry, &cfg, r1, h::mint<USDC>(2_090, ts::ctx(&mut sc)));
+    // second settle re-inserts id1 into intent_settled -> EKeyAlreadyExists -> whole PTB reverts
+    settlement::settle_intent_numeraire(&mut state, &mut registry, &cfg, r2, h::mint<USDC>(2_090, ts::ctx(&mut sc)));
+
+    h::burn(c1);
+    h::burn(c2);
+    ts::return_shared(cfg);
+    ts::return_shared(registry);
+    ts::return_shared(state);
+    ts::return_shared(intent);
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+// ============================================================================
+// Audit review 001 — finding verification
+// Each test below confirms (or refutes) an open finding from
+// audits/001-2026-05-30-internal-stride.md before any fix is written.
+// ============================================================================
+
+/// Drive a single partial-fillable TOKA->USDC intent (sell 1000, min 1900, deadline `deadline`)
+/// all the way to Settlement, with `SOLVER` as the committed winner (floor 2090, k = 2.0x).
+fun drive_one_to_settlement(sc: &mut Scenario, clock: &mut Clock, deadline: u64): ID {
+    clock.set_for_testing(1_000);
+    ts::next_tx(sc, U1);
+    let id;
+    {
+        let mut state = ts::take_shared<AuctionState>(sc);
+        let cfg = ts::take_shared<GlobalConfig>(sc);
+        id = auction::submit_intent_with_price_for_testing<TOKA, USDC>(
+            &mut state, &cfg, h::mint<TOKA>(1_000, ts::ctx(sc)),
+            1_900, MID, 500, true, true, deadline, clock, ts::ctx(sc),
+        );
+        ts::return_shared(cfg);
+        ts::return_shared(state);
+    };
+    register_solver(sc, SOLVER);
+    ts::next_tx(sc, ADMIN);
+    advance(sc, clock);
+    ts::next_tx(sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(sc);
+        let registry = ts::take_shared<SolverRegistry>(sc);
+        let cfg = ts::take_shared<GlobalConfig>(sc);
+        auction::submit_bid(&mut state, &registry, &cfg,
+            vector[id], vector[1_000], vector[2_090], false, 190, ts::ctx(sc));   // benchmark (seq 0)
+        auction::submit_bid(&mut state, &registry, &cfg,
+            vector[id], vector[1_000], vector[4_180], false, 2_090, ts::ctx(sc)); // winning (seq 1)
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+    clock.set_for_testing(7_000);
+    ts::next_tx(sc, ADMIN);
+    advance(sc, clock);
+    ts::next_tx(sc, AUC);
+    {
+        let mut state = ts::take_shared<AuctionState>(sc);
+        let cfg = ts::take_shared<GlobalConfig>(sc);
+        auction::submit_pair_benchmark(&mut state, vector[0], ts::ctx(sc));
+        auction::submit_allocation(&mut state, &cfg, vector[1], 2_090, 1_000_000_000, ts::ctx(sc));
+        ts::return_shared(cfg);
+        ts::return_shared(state);
+    };
+    clock.set_for_testing(13_000);
+    ts::next_tx(sc, ADMIN);
+    advance(sc, clock); // -> Settlement, settlement_deadline = 13_000 + 30_000 = 43_000
+    id
+}
+
+/// Finding (Medium): a winning intent whose deadline falls before the protocol settlement deadline
+/// can no longer be taken — `take_intent_full` aborts `EIntentExpired`, so the solver cannot settle.
+#[test]
+#[expected_failure(abort_code = reiy::settlement::EIntentExpired)]
+fun test_expired_winning_intent_take_aborts() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let id = drive_one_to_settlement(&mut sc, &mut clock, 15_000); // intent expires at 15_000
+
+    // settlement deadline is 43_000, but the intent expired at 15_000
+    clock.set_for_testing(16_000);
+    ts::next_tx(&mut sc, SOLVER);
+    let mut state = ts::take_shared<AuctionState>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+    let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+    let intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id);
+    // aborts EIntentExpired here; the rest is unreachable but must type-check / consume values
+    let (sell, receipt) = settlement::take_intent_full(&mut state, intent, &clock, ts::ctx(&mut sc));
+    settlement::settle_intent_numeraire(&mut state, &mut registry, &cfg, receipt, h::mint<USDC>(4_180, ts::ctx(&mut sc)));
+    h::burn(sell);
+    ts::return_shared(cfg);
+    ts::return_shared(registry);
+    ts::return_shared(state);
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+/// Fix regression: after the settlement deadline, `trigger_fallback` must NOT slash a solver for an
+/// intent that expired before settlement (out of the solver's control). Bond stays intact.
+#[test]
+fun test_expired_intent_not_slashed_in_fallback() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let _id = drive_one_to_settlement(&mut sc, &mut clock, 15_000); // expires at 15_000
+
+    // advance past settlement deadline (43_000); intent is long expired
+    clock.set_for_testing(44_000);
+    ts::next_tx(&mut sc, AUC); // anyone can trigger
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        settlement::trigger_fallback(&mut state, &mut registry, &cfg, &clock, ts::ctx(&mut sc));
+        // expired intent => no slash; bond untouched, no slash recorded
+        assert!(reg::bond_of(&registry, SOLVER) == BOND, 1);
+        assert!(reg::slash_count(&registry, SOLVER) == 0, 2);
+        assert!(auction::phase_code(&state) == 6, 3); // Failed
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+/// Fix regression: a partial fill that consumes the ENTIRE remaining balance is rejected. The final
+/// fill must go through the full-consume path (which deletes the object), so no zombie can form.
+#[test]
+#[expected_failure(abort_code = reiy::intent_book::EFillNotStrictlyPartial)]
+fun test_full_drain_via_partial_rejected() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let id = drive_one_to_settlement(&mut sc, &mut clock, DEADLINE);
+
+    ts::next_tx(&mut sc, SOLVER);
+    let mut state = ts::take_shared<AuctionState>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+    let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+    let mut intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id);
+    // fill == full remaining (1000) must abort EFillNotStrictlyPartial
+    let (sell, receipt) =
+        settlement::take_intent_partial(&mut state, &mut intent, 1_000, &clock, ts::ctx(&mut sc));
+    settlement::settle_intent_numeraire(&mut state, &mut registry, &cfg, receipt, h::mint<USDC>(2_090, ts::ctx(&mut sc)));
+    h::burn(sell);
+    ts::return_shared(cfg);
+    ts::return_shared(registry);
+    ts::return_shared(state);
+    ts::return_shared(intent);
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+/// A strict partial fill (less than remaining) still works and leaves the intent alive with the
+/// residual balance for the next epoch.
+#[test]
+fun test_strict_partial_fill_keeps_residual() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let id = drive_one_to_settlement(&mut sc, &mut clock, DEADLINE);
+
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let mut intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id);
+        let (sell, receipt) =
+            settlement::take_intent_partial(&mut state, &mut intent, 400, &clock, ts::ctx(&mut sc));
+        h::burn(sell);
+        settlement::settle_intent_numeraire(
+            &mut state, &mut registry, &cfg, receipt, h::mint<USDC>(2_090, ts::ctx(&mut sc)),
+        );
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+        ts::return_shared(intent);
+    };
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id);
+        assert!(intent_book::remaining_sell(&intent) == 600, 1); // 1000 - 400 residual
+        ts::return_shared(intent);
+    };
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+/// Fix regression: `close_batch` deposits only the required fee and refunds any overpayment to the
+/// caller; the treasury collects exactly the required amount, not the full coin.
+#[test]
+fun test_overpaid_fee_refunded() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let (id1, id2) = drive_to_settlement(&mut sc, &mut clock);
+
+    settle_one(&mut sc, id1, 4_180, &clock);
+    settle_one(&mut sc, id2, 2_090, &clock);
+
+    // value_sum = 2090 + 1045 = 3135; required fee = 3135 * 5 / 10000 = 1
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC>>(&mut sc);
+        settlement::close_batch(
+            &mut state, &cfg, &mut treasury, h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc),
+        );
+        // only the required 1 collected; the remaining 99 was split off and refunded to the caller
+        assert!(reiy::treasury::total_collected(&treasury) == 1, 1);
+        ts::return_shared(treasury);
+        ts::return_shared(cfg);
+        ts::return_shared(state);
+    };
+    clock.destroy_for_testing();
+    ts::end(sc);
 }
 
 // === SBBO admission ===
