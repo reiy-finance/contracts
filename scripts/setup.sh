@@ -25,15 +25,26 @@ echo "Config  : $GLOBAL_CONFIG_ID"
 echo "AdminCap: $ADMIN_CAP_ID"
 echo ""
 
-# ---- 1. init_treasury<USDC> ----
-echo "Step 1: init_treasury<${USDC_TYPE}> ..."
+# ---- 1. set_numeraire<USDC> ----
+echo "Step 1: set_numeraire<${USDC_TYPE}> ..."
+sui client ptb \
+  --move-call "${REIY_PACKAGE_ID}::config::set_numeraire<${USDC_TYPE}>" \
+    "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
+  --gas-budget "${GAS_BUDGET}"
+
+# ---- 2. init_treasury<USDC> ----
+echo ""
+echo "Step 2: init_treasury<${USDC_TYPE}> ..."
 TREASURY_OUTPUT=$(
   sui client ptb \
     --move-call "${REIY_PACKAGE_ID}::treasury::init_treasury<${USDC_TYPE}>" \
       "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
     --gas-budget "${GAS_BUDGET}" \
     --json 2>&1
-)
+) || {
+  echo "$TREASURY_OUTPUT" >&2
+  exit 1
+}
 echo "$TREASURY_OUTPUT" | tee /tmp/reiy_treasury_deploy.json
 
 TREASURY_ID=$(echo "$TREASURY_OUTPUT" | jq -r '
@@ -55,14 +66,6 @@ if grep -q "^PROTOCOL_TREASURY_ID=" "$ENV_FILE"; then
 else
   echo "PROTOCOL_TREASURY_ID=${TREASURY_ID}" >> "$ENV_FILE"
 fi
-
-# ---- 2. set_numeraire<USDC> ----
-echo ""
-echo "Step 2: set_numeraire<${USDC_TYPE}> ..."
-sui client ptb \
-  --move-call "${REIY_PACKAGE_ID}::config::set_numeraire<${USDC_TYPE}>" \
-    "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
-  --gas-budget "${GAS_BUDGET}"
 
 # ---- 3. add_numeraire_pool per token that needs normalization ----
 # Pattern: add_numeraire_pool<Token>(config, pool_id, cap)
