@@ -4,6 +4,7 @@ module reiy::test_helpers;
 
 use sui::clock::{Self, Clock};
 use sui::coin::{Self, Coin};
+use sui::sui::SUI;
 use sui::test_scenario::{Self as ts, Scenario};
 use reiy::config::{Self, GlobalConfig, AdminCap};
 use reiy::auction;
@@ -27,15 +28,14 @@ public fun new_clock(ctx: &mut TxContext): Clock {
     clock::create_for_testing(ctx)
 }
 
-/// Initialize config + auction + registry, set numeraire = USDC, allowlist a few directed pairs,
-/// and create the USDC treasury. Leaves shared objects in place for `take_shared`.
+/// Initialize config + auction, set numeraire = USDC, allowlist pairs,
+/// and create the SUI-staked registry plus USDC/SUI treasury.
 public fun setup_all(scenario: &mut Scenario, admin: address) {
     ts::next_tx(scenario, admin);
     {
         let ctx = ts::ctx(scenario);
         config::init_for_testing(ctx);
         auction::init_for_testing(ctx);
-        solver_registry::init_for_testing(ctx);
     };
     ts::next_tx(scenario, admin);
     {
@@ -45,9 +45,9 @@ public fun setup_all(scenario: &mut Scenario, admin: address) {
         config::add_supported_pair<TOKA, USDC>(&mut cfg, &cap);
         config::add_supported_pair<TOKB, USDC>(&mut cfg, &cap);
         config::add_supported_pair<TOKA, TOKB>(&mut cfg, &cap);
-        treasury::init_treasury<USDC>(&cfg, &cap, ts::ctx(scenario));
+        solver_registry::init_for_testing<SUI>(&cap, ts::ctx(scenario));
+        treasury::init_treasury<USDC, SUI>(&cfg, &cap, ts::ctx(scenario));
         ts::return_to_sender(scenario, cap);
         ts::return_shared(cfg);
     };
 }
-

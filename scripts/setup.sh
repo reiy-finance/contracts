@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Post-deploy setup: init_treasury, add_supported_pairs, add_numeraire_pool.
+# Post-deploy setup: init_registry, init_treasury, add_supported_pairs, add_numeraire_pool.
 # All calls go through `sui client ptb` (no move test_only paths).
 # Usage: setup.sh <env_file>
 set -euo pipefail
@@ -10,7 +10,7 @@ source "$ENV_FILE"
 # --- guard: make sure required vars are set ---
 required_vars=(
   REIY_PACKAGE_ID GLOBAL_CONFIG_ID ADMIN_CAP_ID
-  USDC_TYPE GAS_BUDGET
+  USDC_TYPE SUI_TYPE GAS_BUDGET
 )
 for v in "${required_vars[@]}"; do
   if [[ -z "${!v:-}" ]]; then
@@ -25,6 +25,10 @@ echo "Config  : $GLOBAL_CONFIG_ID"
 echo "AdminCap: $ADMIN_CAP_ID"
 echo ""
 
+STAKE_TYPE=${STAKE_TYPE:-$SUI_TYPE}
+echo "Stake   : $STAKE_TYPE"
+echo ""
+
 # ---- 1. set_numeraire<USDC> ----
 echo "Step 1: set_numeraire<${USDC_TYPE}> ..."
 sui client ptb \
@@ -32,12 +36,46 @@ sui client ptb \
     "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
   --gas-budget "${GAS_BUDGET}"
 
-# ---- 2. init_treasury<USDC> ----
+# ---- 2. init_registry<STAKE> ----
 echo ""
-echo "Step 2: init_treasury<${USDC_TYPE}> ..."
+echo "Step 2: init_registry<${STAKE_TYPE}> ..."
+REGISTRY_OUTPUT=$(
+  sui client ptb \
+    --move-call "${REIY_PACKAGE_ID}::solver_registry::init_registry<${STAKE_TYPE}>" \
+      "@${ADMIN_CAP_ID}" \
+    --gas-budget "${GAS_BUDGET}" \
+    --json 2>&1
+) || {
+  echo "$REGISTRY_OUTPUT" >&2
+  exit 1
+}
+echo "$REGISTRY_OUTPUT" | tee /tmp/reiy_registry_deploy.json
+
+REGISTRY_ID=$(echo "$REGISTRY_OUTPUT" | jq -r '
+  .objectChanges[]
+  | select(.type == "created")
+  | select(.objectType | test("SolverRegistry"))
+  | .objectId
+' | head -1)
+
+if [[ -z "$REGISTRY_ID" ]]; then
+  echo "ERROR: could not extract SolverRegistry ID" >&2
+  exit 1
+fi
+echo "SolverRegistry: $REGISTRY_ID"
+
+if grep -q "^SOLVER_REGISTRY_ID=" "$ENV_FILE"; then
+  sed -i.bak "s|^SOLVER_REGISTRY_ID=.*|SOLVER_REGISTRY_ID=${REGISTRY_ID}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
+else
+  echo "SOLVER_REGISTRY_ID=${REGISTRY_ID}" >> "$ENV_FILE"
+fi
+
+# ---- 3. init_treasury<USDC, STAKE> ----
+echo ""
+echo "Step 3: init_treasury<${USDC_TYPE},${STAKE_TYPE}> ..."
 TREASURY_OUTPUT=$(
   sui client ptb \
-    --move-call "${REIY_PACKAGE_ID}::treasury::init_treasury<${USDC_TYPE}>" \
+    --move-call "${REIY_PACKAGE_ID}::treasury::init_treasury<${USDC_TYPE},${STAKE_TYPE}>" \
       "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
     --gas-budget "${GAS_BUDGET}" \
     --json 2>&1
@@ -67,7 +105,7 @@ else
   echo "PROTOCOL_TREASURY_ID=${TREASURY_ID}" >> "$ENV_FILE"
 fi
 
-# ---- 3. add_numeraire_pool per token that needs normalization ----
+# ---- 4. add_numeraire_pool per token that needs normalization ----
 # Pattern: add_numeraire_pool<Token>(config, pool_id, cap)
 add_numeraire_pool_if_set() {
   local token_label=$1
@@ -87,7 +125,7 @@ add_numeraire_pool_if_set() {
 }
 
 echo ""
-echo "Step 3: add_numeraire_pool ..."
+echo "Step 4: add_numeraire_pool ..."
 if [[ -n "${NUMERAIRE_POOLS:-}" ]]; then
   for ENTRY in $NUMERAIRE_POOLS; do
     if [[ "$ENTRY" == *"|"* ]]; then
@@ -109,9 +147,9 @@ else
   add_numeraire_pool_if_set "WDEEP -> WUSDC" "${WDEEP_TYPE:-}" "${DEEPBOOK_WDEEP_WUSDC_POOL:-}"
 fi
 
-# ---- 4. add_supported_pairs ----
+# ---- 5. add_supported_pairs ----
 echo ""
-echo "Step 4: add_supported_pairs ..."
+echo "Step 5: add_supported_pairs ..."
 if [[ -z "${SUPPORTED_PAIRS:-}" ]]; then
   echo "SUPPORTED_PAIRS not set — skipping"
 else
@@ -141,18 +179,19 @@ else
   done
 fi
 
-# ---- 5. (mainnet only) transfer AdminCap to multisig ----
+# ---- 6. (mainnet only) transfer AdminCap to multisig ----
 if [[ -n "${MULTISIG_ADDRESS:-}" ]]; then
   echo ""
-  echo "Step 5: Transferring AdminCap to multisig ${MULTISIG_ADDRESS} ..."
+  echo "Step 6: Transferring AdminCap to multisig ${MULTISIG_ADDRESS} ..."
   sui client ptb \
     --transfer-objects "[@${ADMIN_CAP_ID}]" "@${MULTISIG_ADDRESS}" \
     --gas-budget "${GAS_BUDGET}"
   echo "✓ AdminCap transferred — you can no longer call setup again without multisig co-sign"
 else
-  echo "Step 5: MULTISIG_ADDRESS not set — AdminCap stays with deployer"
+  echo "Step 6: MULTISIG_ADDRESS not set — AdminCap stays with deployer"
 fi
 
 echo ""
 echo "=== Setup complete ==="
+echo "SOLVER_REGISTRY_ID = $REGISTRY_ID"
 echo "PROTOCOL_TREASURY_ID = $TREASURY_ID"

@@ -10,13 +10,13 @@ use reiy::events;
 use reiy::intent_book::{Self, Intent};
 use reiy::math;
 use reiy::price_adapter;
-use reiy::solver_registry::{Self, SolverRegistry};
+use reiy::solver_registry::{Self, SolverRegistry, StakeReservationKey};
 use reiy::treasury::{Self, ProtocolTreasury};
 use reiy::types::{Self, PairKey};
 use std::type_name;
 use sui::clock::Clock;
 use sui::coin::{Self, Coin};
-use sui::sui::SUI;
+use sui::vec_set::VecSet;
 
 // === Errors ===
 #[error]
@@ -145,9 +145,9 @@ public fun take_intent_partial<Sell, Buy>(
 // === Settle ===
 
 /// Settle a winning intent whose BUY token IS the protocol numeraire.
-public fun settle_intent_numeraire<Sell, Buy>(
+public fun settle_intent_numeraire<Sell, Buy, Stake>(
     state: &mut AuctionState,
-    registry: &mut SolverRegistry,
+    registry: &mut SolverRegistry<Stake>,
     config: &GlobalConfig,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
@@ -160,9 +160,9 @@ public fun settle_intent_numeraire<Sell, Buy>(
 
 /// Settle a winning intent, normalizing its surplus into numeraire units using the allowlisted
 /// `Buy/Numeraire` DeepBook pool.
-public fun settle_intent<Sell, Buy, NumBase, NumQuote>(
+public fun settle_intent<Sell, Buy, NumBase, NumQuote, Stake>(
     state: &mut AuctionState,
-    registry: &mut SolverRegistry,
+    registry: &mut SolverRegistry<Stake>,
     config: &GlobalConfig,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
@@ -227,9 +227,9 @@ fun normalize_surplus<Buy, NumBase, NumQuote>(
     }
 }
 
-fun finalize_settlement<Sell, Buy>(
+fun finalize_settlement<Sell, Buy, Stake>(
     state: &mut AuctionState,
-    registry: &mut SolverRegistry,
+    registry: &mut SolverRegistry<Stake>,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
     raw_surplus: u64,
@@ -248,9 +248,9 @@ fun finalize_settlement<Sell, Buy>(
     );
 }
 
-fun finalize_settlement_normalized<Sell, Buy>(
+fun finalize_settlement_normalized<Sell, Buy, Stake>(
     state: &mut AuctionState,
-    registry: &mut SolverRegistry,
+    registry: &mut SolverRegistry<Stake>,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
     raw_surplus: u64,
@@ -293,10 +293,11 @@ fun finalize_settlement_normalized<Sell, Buy>(
 /// Close the batch: dual verification (score + per-pair k), fee collection, and reward distribution.
 /// All winning intents must be settled before calling.
 #[allow(lint(self_transfer))]
-public fun close_batch<N>(
+public fun close_batch<N, Stake>(
     state: &mut AuctionState,
     config: &GlobalConfig,
-    treasury: &mut ProtocolTreasury<N>,
+    registry: &mut SolverRegistry<Stake>,
+    treasury: &mut ProtocolTreasury<N, Stake>,
     mut fee: Coin<N>,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -337,6 +338,7 @@ public fun close_batch<N>(
     };
 
     distribute_rewards(state, config, treasury, actual_score, value_sum, ctx);
+    release_winning_reservations(state, registry);
 
     events::emit_settlement_complete(
         epoch,
@@ -349,10 +351,10 @@ public fun close_batch<N>(
     auction::set_closed(state, config, clock);
 }
 
-fun distribute_rewards<N>(
+fun distribute_rewards<N, Stake>(
     state: &AuctionState,
     config: &GlobalConfig,
-    treasury: &mut ProtocolTreasury<N>,
+    treasury: &mut ProtocolTreasury<N, Stake>,
     actual_score: u64,
     value_sum: u64,
     ctx: &mut TxContext,
@@ -380,6 +382,36 @@ fun distribute_rewards<N>(
     };
 }
 
+fun release_winning_reservations<Stake>(
+    state: &AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+) {
+    let keys = auction::winning_reservation_keys(state);
+    let mut i = 0;
+    let n = keys.length();
+    while (i < n) {
+        solver_registry::release_stake(registry, keys[i]);
+        i = i + 1;
+    };
+}
+
+fun release_unslashed_winning_reservations<Stake>(
+    state: &AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+    slashed: &VecSet<StakeReservationKey>,
+) {
+    let keys = auction::winning_reservation_keys(state);
+    let mut i = 0;
+    let n = keys.length();
+    while (i < n) {
+        let key = keys[i];
+        if (!slashed.contains(&key)) {
+            solver_registry::release_stake(registry, key);
+        };
+        i = i + 1;
+    };
+}
+
 // === Fallback ===
 
 /// Permissionless fallback after the settlement deadline. A solver is slashed only for intents that
@@ -387,10 +419,11 @@ fun distribute_rewards<N>(
 /// expired before settlement are neither slashed nor re-queued; the owner reclaims them via cancel.
 /// Still-valid unsettled intents are re-queued for the next epoch. The epoch moves to Failed.
 #[allow(lint(self_transfer))]
-public fun trigger_fallback(
+public fun trigger_fallback<N, Stake>(
     state: &mut AuctionState,
-    registry: &mut SolverRegistry,
+    registry: &mut SolverRegistry<Stake>,
     config: &GlobalConfig,
+    treasury: &mut ProtocolTreasury<N, Stake>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -399,8 +432,8 @@ public fun trigger_fallback(
     assert!(now > auction::settlement_deadline_ms(state), ETooEarly);
 
     let ids = auction::winner_intent_ids(state);
-    let mut slashed = sui::balance::zero<SUI>();
-    let mut slashed_solvers = sui::vec_set::empty<address>();
+    let mut slashed = sui::balance::zero<Stake>();
+    let mut slashed_reservations = sui::vec_set::empty<StakeReservationKey>();
 
     let mut i = 0;
     let n = ids.length();
@@ -410,22 +443,19 @@ public fun trigger_fallback(
             let (pair, min_out, sell_amount, partial, deadline) = auction::intent_meta_of(state, &id);
             // Expired intents were impossible to settle: do not slash, do not re-queue.
             if (now <= deadline) {
-                let solver = auction::solver_of_intent(state, &id);
+                let reservation_key = auction::reservation_of_intent(state, &id);
                 if (
-                    !slashed_solvers.contains(&solver) && solver_registry::is_registered(registry, solver)
+                    !slashed_reservations.contains(&reservation_key)
+                    && solver_registry::has_reservation(registry, reservation_key)
                 ) {
-                    slashed_solvers.insert(solver);
-                    let amount = solver_registry::bond_of(registry, solver);
-                    if (amount > 0) {
-                        let b = solver_registry::slash(
-                            registry,
-                            solver,
-                            amount,
-                            solver_registry::reason_timeout(),
-                            ctx,
-                        );
-                        slashed.join(b);
-                    };
+                    slashed_reservations.insert(reservation_key);
+                    let b = solver_registry::slash_reserved_stake(
+                        registry,
+                        reservation_key,
+                        solver_registry::reason_timeout(),
+                        ctx,
+                    );
+                    slashed.join(b);
                 };
                 auction::requeue_intent(state, id, pair, min_out, sell_amount, partial, deadline);
             };
@@ -435,8 +465,22 @@ public fun trigger_fallback(
 
     auction::set_failed(state, config, clock);
 
+    release_unslashed_winning_reservations(state, registry, &slashed_reservations);
+
     if (slashed.value() > 0) {
-        transfer::public_transfer(coin::from_balance(slashed, ctx), ctx.sender());
+        let total = slashed.value();
+        let bounty = math::mul_div_floor(total, config.fallback_bounty_bps(), math::bps_denom());
+        let mut stake = coin::from_balance(slashed, ctx);
+        if (bounty > 0) {
+            let bounty_coin = stake.split(bounty, ctx);
+            treasury::record_fallback_bounty(treasury, bounty);
+            transfer::public_transfer(bounty_coin, ctx.sender());
+        };
+        if (stake.value() > 0) {
+            treasury::deposit_slashed_stake(treasury, stake, auction::current_epoch(state));
+        } else {
+            stake.destroy_zero();
+        };
     } else {
         slashed.destroy_zero();
     };
@@ -445,9 +489,9 @@ public fun trigger_fallback(
 // === Test-only settle (inject normalized values, no DeepBook) ===
 
 #[test_only]
-public fun settle_intent_with_values_for_testing<Sell, Buy>(
+public fun settle_intent_with_values_for_testing<Sell, Buy, Stake>(
     state: &mut AuctionState,
-    registry: &mut SolverRegistry,
+    registry: &mut SolverRegistry<Stake>,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
     score_value: u64,

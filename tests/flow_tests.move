@@ -6,7 +6,7 @@ module reiy::flow_tests;
 use sui::sui::SUI;
 use sui::clock::Clock;
 use sui::test_scenario::{Self as ts, Scenario};
-use reiy::config::GlobalConfig;
+use reiy::config::{Self as config, GlobalConfig, AdminCap};
 use reiy::auction::{Self, AuctionState};
 use reiy::intent_book::{Self, Intent};
 use reiy::solver_registry::{Self as reg, SolverRegistry};
@@ -21,24 +21,26 @@ const U1: address = @0x1;
 
 const MID: u64 = 2_000_000_000; // 2.0x TOKA->USDC
 const DEADLINE: u64 = 10_000_000;
-const BOND: u64 = 2_000_000_000;
+const STAKE_AMOUNT: u64 = 2_000_000_000;
 
 // === helpers ===
 
 fun register_solver(sc: &mut Scenario, who: address) {
     ts::next_tx(sc, who);
-    let mut registry = ts::take_shared<SolverRegistry>(sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(sc);
     let cfg = ts::take_shared<GlobalConfig>(sc);
-    reg::register_solver(&mut registry, &cfg, h::mint<SUI>(BOND, ts::ctx(sc)), b"http://s", ts::ctx(sc));
+    reg::register_solver(&mut registry, &cfg, h::mint<SUI>(STAKE_AMOUNT, ts::ctx(sc)), b"http://s", ts::ctx(sc));
     ts::return_shared(cfg);
     ts::return_shared(registry);
 }
 
 fun advance(sc: &mut Scenario, clock: &Clock) {
     let mut state = ts::take_shared<AuctionState>(sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(sc);
     let cfg = ts::take_shared<GlobalConfig>(sc);
-    auction::advance_phase(&mut state, &cfg, clock);
+    auction::advance_phase(&mut state, &mut registry, &cfg, clock);
     ts::return_shared(cfg);
+    ts::return_shared(registry);
     ts::return_shared(state);
 }
 
@@ -74,6 +76,7 @@ fun test_full_lifecycle_happy() {
     };
 
     register_solver(&mut sc, SOLVER);
+    register_solver(&mut sc, AUC);
 
     // --- advance to Bid ---
     ts::next_tx(&mut sc, ADMIN);
@@ -83,16 +86,16 @@ fun test_full_lifecycle_happy() {
     ts::next_tx(&mut sc, SOLVER);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        let registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
         // reference bid: payouts 1.1x of m_eff (1900,950) -> (2090,1045)
         auction::submit_bid(
-            &mut state, &registry, &cfg,
+            &mut state, &mut registry, &cfg,
             vector[id1, id2], vector[1_000, 500], vector[2_090, 1_045], false, 285, ts::ctx(&mut sc),
         );
         // winning bid: payouts 2.2x of m_eff -> (4180,2090); surplus over benchmark floor = 3135
         auction::submit_bid(
-            &mut state, &registry, &cfg,
+            &mut state, &mut registry, &cfg,
             vector[id1, id2], vector[1_000, 500], vector[4_180, 2_090], false, 3_135, ts::ctx(&mut sc),
         );
         ts::return_shared(cfg);
@@ -109,10 +112,12 @@ fun test_full_lifecycle_happy() {
     ts::next_tx(&mut sc, AUC);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        auction::submit_pair_benchmark(&mut state, vector[0], ts::ctx(&mut sc));
-        auction::submit_allocation(&mut state, &cfg, vector[1], 3_135, 1_000_000_000, ts::ctx(&mut sc));
+        auction::submit_pair_benchmark(&mut state, &mut registry, &cfg, vector[0], ts::ctx(&mut sc));
+        auction::submit_allocation(&mut state, &mut registry, &cfg, vector[1], 3_135, ts::ctx(&mut sc));
         ts::return_shared(cfg);
+        ts::return_shared(registry);
         ts::return_shared(state);
     };
 
@@ -123,8 +128,12 @@ fun test_full_lifecycle_happy() {
     ts::next_tx(&mut sc, ADMIN);
     {
         let state = ts::take_shared<AuctionState>(&mut sc);
+        let registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         assert!(auction::is_settlement(&state), 100);
         assert!(!auction::winner_is_fallback(&state), 101);
+        assert!(reg::reserved_stake_of(&registry, SOLVER) == 1_000_000_000, 102);
+        assert!(reg::reserved_stake_of(&registry, AUC) == 0, 103);
+        ts::return_shared(registry);
         ts::return_shared(state);
     };
 
@@ -138,12 +147,16 @@ fun test_full_lifecycle_happy() {
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        let mut treasury = ts::take_shared<ProtocolTreasury<USDC>>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
         settlement::close_batch(
-            &mut state, &cfg, &mut treasury, h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc),
+            &mut state, &cfg, &mut registry, &mut treasury,
+            h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc),
         );
         assert!(auction::phase_code(&state) == 4, 200); // Close
+        assert!(reg::reserved_stake_of(&registry, SOLVER) == 0, 201);
         ts::return_shared(treasury);
+        ts::return_shared(registry);
         ts::return_shared(cfg);
         ts::return_shared(state);
     };
@@ -165,7 +178,7 @@ fun test_full_lifecycle_happy() {
 fun settle_one(sc: &mut Scenario, id: ID, payout: u64, clock: &Clock) {
     ts::next_tx(sc, SOLVER);
     let mut state = ts::take_shared<AuctionState>(sc);
-    let mut registry = ts::take_shared<SolverRegistry>(sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(sc);
     let cfg = ts::take_shared<GlobalConfig>(sc);
     let intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(sc, id);
     let (sell_coin, receipt) = settlement::take_intent_full(&mut state, intent, clock, ts::ctx(sc));
@@ -201,16 +214,19 @@ fun drive_to_settlement(sc: &mut Scenario, clock: &mut Clock): (ID, ID) {
         ts::return_shared(state);
     };
     register_solver(sc, SOLVER);
+    register_solver(sc, AUC);
     ts::next_tx(sc, ADMIN);
     advance(sc, clock);
     ts::next_tx(sc, SOLVER);
     {
         let mut state = ts::take_shared<AuctionState>(sc);
-        let registry = ts::take_shared<SolverRegistry>(sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(sc);
         let cfg = ts::take_shared<GlobalConfig>(sc);
-        auction::submit_bid(&mut state, &registry, &cfg,
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
             vector[id1, id2], vector[1_000, 500], vector[2_090, 1_045], false, 285, ts::ctx(sc));
-        auction::submit_bid(&mut state, &registry, &cfg,
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
             vector[id1, id2], vector[1_000, 500], vector[4_180, 2_090], false, 3_135, ts::ctx(sc));
         ts::return_shared(cfg);
         ts::return_shared(registry);
@@ -222,10 +238,12 @@ fun drive_to_settlement(sc: &mut Scenario, clock: &mut Clock): (ID, ID) {
     ts::next_tx(sc, AUC);
     {
         let mut state = ts::take_shared<AuctionState>(sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(sc);
         let cfg = ts::take_shared<GlobalConfig>(sc);
-        auction::submit_pair_benchmark(&mut state, vector[0], ts::ctx(sc));
-        auction::submit_allocation(&mut state, &cfg, vector[1], 3_135, 1_000_000_000, ts::ctx(sc));
+        auction::submit_pair_benchmark(&mut state, &mut registry, &cfg, vector[0], ts::ctx(sc));
+        auction::submit_allocation(&mut state, &mut registry, &cfg, vector[1], 3_135, ts::ctx(sc));
         ts::return_shared(cfg);
+        ts::return_shared(registry);
         ts::return_shared(state);
     };
     clock.set_for_testing(13_000);
@@ -250,7 +268,7 @@ fun test_double_partial_settle_same_intent_reverts() {
 
     ts::next_tx(&mut sc, SOLVER);
     let mut state = ts::take_shared<AuctionState>(&mut sc);
-    let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
     let cfg = ts::take_shared<GlobalConfig>(&mut sc);
     let mut intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id1);
 
@@ -296,16 +314,19 @@ fun drive_one_to_settlement(sc: &mut Scenario, clock: &mut Clock, deadline: u64)
         ts::return_shared(state);
     };
     register_solver(sc, SOLVER);
+    register_solver(sc, AUC);
     ts::next_tx(sc, ADMIN);
     advance(sc, clock);
     ts::next_tx(sc, SOLVER);
     {
         let mut state = ts::take_shared<AuctionState>(sc);
-        let registry = ts::take_shared<SolverRegistry>(sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(sc);
         let cfg = ts::take_shared<GlobalConfig>(sc);
-        auction::submit_bid(&mut state, &registry, &cfg,
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
             vector[id], vector[1_000], vector[2_090], false, 190, ts::ctx(sc));   // benchmark (seq 0)
-        auction::submit_bid(&mut state, &registry, &cfg,
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
             vector[id], vector[1_000], vector[4_180], false, 2_090, ts::ctx(sc)); // winning (seq 1)
         ts::return_shared(cfg);
         ts::return_shared(registry);
@@ -317,10 +338,12 @@ fun drive_one_to_settlement(sc: &mut Scenario, clock: &mut Clock, deadline: u64)
     ts::next_tx(sc, AUC);
     {
         let mut state = ts::take_shared<AuctionState>(sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(sc);
         let cfg = ts::take_shared<GlobalConfig>(sc);
-        auction::submit_pair_benchmark(&mut state, vector[0], ts::ctx(sc));
-        auction::submit_allocation(&mut state, &cfg, vector[1], 2_090, 1_000_000_000, ts::ctx(sc));
+        auction::submit_pair_benchmark(&mut state, &mut registry, &cfg, vector[0], ts::ctx(sc));
+        auction::submit_allocation(&mut state, &mut registry, &cfg, vector[1], 2_090, ts::ctx(sc));
         ts::return_shared(cfg);
+        ts::return_shared(registry);
         ts::return_shared(state);
     };
     clock.set_for_testing(13_000);
@@ -344,7 +367,7 @@ fun test_expired_winning_intent_take_aborts() {
     clock.set_for_testing(16_000);
     ts::next_tx(&mut sc, SOLVER);
     let mut state = ts::take_shared<AuctionState>(&mut sc);
-    let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
     let cfg = ts::take_shared<GlobalConfig>(&mut sc);
     let intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id);
     // aborts EIntentExpired here; the rest is unreachable but must type-check / consume values
@@ -359,7 +382,7 @@ fun test_expired_winning_intent_take_aborts() {
 }
 
 /// Fix regression: after the settlement deadline, `trigger_fallback` must NOT slash a solver for an
-/// intent that expired before settlement (out of the solver's control). Bond stays intact.
+/// intent that expired before settlement (out of the solver's control). Stake stays intact.
 #[test]
 fun test_expired_intent_not_slashed_in_fallback() {
     let mut sc = ts::begin(ADMIN);
@@ -373,13 +396,18 @@ fun test_expired_intent_not_slashed_in_fallback() {
     ts::next_tx(&mut sc, AUC); // anyone can trigger
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        settlement::trigger_fallback(&mut state, &mut registry, &cfg, &clock, ts::ctx(&mut sc));
-        // expired intent => no slash; bond untouched, no slash recorded
-        assert!(reg::bond_of(&registry, SOLVER) == BOND, 1);
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+        settlement::trigger_fallback(
+            &mut state, &mut registry, &cfg, &mut treasury, &clock, ts::ctx(&mut sc),
+        );
+        // expired intent => no slash; stake untouched, no slash recorded
+        assert!(reg::stake_of(&registry, SOLVER) == STAKE_AMOUNT, 1);
+        assert!(reg::reserved_stake_of(&registry, SOLVER) == 0, 4);
         assert!(reg::slash_count(&registry, SOLVER) == 0, 2);
         assert!(auction::phase_code(&state) == 6, 3); // Failed
+        ts::return_shared(treasury);
         ts::return_shared(cfg);
         ts::return_shared(registry);
         ts::return_shared(state);
@@ -401,7 +429,7 @@ fun test_full_drain_via_partial_rejected() {
 
     ts::next_tx(&mut sc, SOLVER);
     let mut state = ts::take_shared<AuctionState>(&mut sc);
-    let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
     let cfg = ts::take_shared<GlobalConfig>(&mut sc);
     let mut intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id);
     // fill == full remaining (1000) must abort EFillNotStrictlyPartial
@@ -430,7 +458,7 @@ fun test_strict_partial_fill_keeps_residual() {
     ts::next_tx(&mut sc, SOLVER);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
         let mut intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id);
         let (sell, receipt) =
@@ -472,13 +500,16 @@ fun test_overpaid_fee_refunded() {
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        let mut treasury = ts::take_shared<ProtocolTreasury<USDC>>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
         settlement::close_batch(
-            &mut state, &cfg, &mut treasury, h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc),
+            &mut state, &cfg, &mut registry, &mut treasury,
+            h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc),
         );
         // only the required 1 collected; the remaining 99 was split off and refunded to the caller
         assert!(reiy::treasury::total_collected(&treasury) == 1, 1);
         ts::return_shared(treasury);
+        ts::return_shared(registry);
         ts::return_shared(cfg);
         ts::return_shared(state);
     };
@@ -558,15 +589,17 @@ fun test_bid_scope_mismatch_aborts() {
         ts::return_shared(state);
     };
     register_solver(&mut sc, SOLVER);
+    register_solver(&mut sc, AUC);
     ts::next_tx(&mut sc, ADMIN);
     advance(&mut sc, &clock);
     ts::next_tx(&mut sc, SOLVER);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        let registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
         // single pair but declared_multi = true
-        auction::submit_bid(&mut state, &registry, &cfg,
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
             vector[id1], vector[1_000], vector[2_090], true, 190, ts::ctx(&mut sc));
         ts::return_shared(cfg);
         ts::return_shared(registry);
@@ -577,8 +610,8 @@ fun test_bid_scope_mismatch_aborts() {
 }
 
 #[test]
-#[expected_failure(abort_code = reiy::auction::EBondTooSmall)]
-fun test_bid_bond_too_small_aborts() {
+#[expected_failure(abort_code = reiy::auction::EStakeTooSmall)]
+fun test_bid_stake_too_small_aborts() {
     let mut sc = ts::begin(ADMIN);
     h::setup_all(&mut sc, ADMIN);
     ts::next_tx(&mut sc, ADMIN);
@@ -596,16 +629,17 @@ fun test_bid_bond_too_small_aborts() {
         ts::return_shared(cfg);
         ts::return_shared(state);
     };
-    register_solver(&mut sc, SOLVER); // bond = 2 SUI
+    register_solver(&mut sc, SOLVER); // stake = 2 SUI
     ts::next_tx(&mut sc, ADMIN);
     advance(&mut sc, &clock);
     ts::next_tx(&mut sc, SOLVER);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        let registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        // huge score -> required bond = score*1.5 >> 2 SUI
-        auction::submit_bid(&mut state, &registry, &cfg,
+        // huge score -> required stake = score*1.5 >> 2 SUI
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
             vector[id1], vector[1_000], vector[2_090], false, 10_000_000_000, ts::ctx(&mut sc));
         ts::return_shared(cfg);
         ts::return_shared(registry);
@@ -673,9 +707,14 @@ fun test_close_score_mismatch_aborts() {
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        let mut treasury = ts::take_shared<ProtocolTreasury<USDC>>(&mut sc);
-        settlement::close_batch(&mut state, &cfg, &mut treasury, h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc));
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+        settlement::close_batch(
+            &mut state, &cfg, &mut registry, &mut treasury,
+            h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc),
+        );
         ts::return_shared(treasury);
+        ts::return_shared(registry);
         ts::return_shared(cfg);
         ts::return_shared(state);
     };
@@ -705,14 +744,16 @@ fun test_selection_fallback_to_benchmark() {
         ts::return_shared(state);
     };
     register_solver(&mut sc, SOLVER);
+    register_solver(&mut sc, AUC);
     ts::next_tx(&mut sc, ADMIN);
     advance(&mut sc, &clock);
     ts::next_tx(&mut sc, SOLVER);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        let registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        auction::submit_bid(&mut state, &registry, &cfg,
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
             vector[id1], vector[1_000], vector[2_090], false, 190, ts::ctx(&mut sc));
         ts::return_shared(cfg);
         ts::return_shared(registry);
@@ -725,7 +766,11 @@ fun test_selection_fallback_to_benchmark() {
     ts::next_tx(&mut sc, AUC);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        auction::submit_pair_benchmark(&mut state, vector[0], ts::ctx(&mut sc));
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_pair_benchmark(&mut state, &mut registry, &cfg, vector[0], ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
         ts::return_shared(state);
     };
     clock.set_for_testing(13_000);
@@ -736,6 +781,89 @@ fun test_selection_fallback_to_benchmark() {
         let state = ts::take_shared<AuctionState>(&mut sc);
         assert!(auction::is_settlement(&state), 0);
         assert!(auction::winner_is_fallback(&state), 1);
+        ts::return_shared(state);
+    };
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+#[test]
+fun test_benchmark_fallback_slashes_auctioneer_reservation() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    clock.set_for_testing(1_000);
+    ts::next_tx(&mut sc, U1);
+    let id1;
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        id1 = auction::submit_intent_with_price_for_testing<TOKA, USDC>(
+            &mut state, &cfg, h::mint<TOKA>(1_000, ts::ctx(&mut sc)),
+            1_900, MID, 500, true, false, DEADLINE, &clock, ts::ctx(&mut sc),
+        );
+        ts::return_shared(cfg);
+        ts::return_shared(state);
+    };
+    register_solver(&mut sc, SOLVER);
+    register_solver(&mut sc, AUC);
+    ts::next_tx(&mut sc, ADMIN);
+    advance(&mut sc, &clock);
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
+            vector[id1], vector[1_000], vector[2_090], false, 190, ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+    clock.set_for_testing(7_000);
+    ts::next_tx(&mut sc, ADMIN);
+    advance(&mut sc, &clock);
+    ts::next_tx(&mut sc, AUC);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_pair_benchmark(&mut state, &mut registry, &cfg, vector[0], ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+    clock.set_for_testing(13_000);
+    ts::next_tx(&mut sc, ADMIN);
+    advance(&mut sc, &clock);
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        assert!(reg::reserved_stake_of(&registry, SOLVER) == 0, 0);
+        assert!(reg::reserved_stake_of(&registry, AUC) == 1_000_000_000, 1);
+        ts::return_shared(registry);
+    };
+
+    clock.set_for_testing(50_000);
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+        settlement::trigger_fallback(
+            &mut state, &mut registry, &cfg, &mut treasury, &clock, ts::ctx(&mut sc),
+        );
+        assert!(reg::stake_of(&registry, SOLVER) == STAKE_AMOUNT, 2);
+        assert!(reg::stake_of(&registry, AUC) == STAKE_AMOUNT - 1_000_000_000, 3);
+        assert!(reg::reserved_stake_of(&registry, AUC) == 0, 4);
+        assert!(reg::slash_count(&registry, AUC) == 1, 5);
+        assert!(reiy::treasury::stake_balance(&treasury) == 1_000_000_000, 6);
+        ts::return_shared(treasury);
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
         ts::return_shared(state);
     };
     clock.destroy_for_testing();
@@ -756,15 +884,67 @@ fun test_fallback_slash_on_deadline_miss() {
     ts::next_tx(&mut sc, AUC);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        let mut registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        settlement::trigger_fallback(&mut state, &mut registry, &cfg, &clock, ts::ctx(&mut sc));
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+        settlement::trigger_fallback(
+            &mut state, &mut registry, &cfg, &mut treasury, &clock, ts::ctx(&mut sc),
+        );
         assert!(auction::phase_code(&state) == 6, 0); // Failed
-        assert!(reg::bond_of(&registry, SOLVER) == 0, 1); // full bond slashed
+        assert!(reg::stake_of(&registry, SOLVER) == STAKE_AMOUNT - 1_000_000_000, 1);
+        assert!(reg::reserved_stake_of(&registry, SOLVER) == 0, 4);
         assert!(reg::slash_count(&registry, SOLVER) == 1, 2);
+        assert!(reiy::treasury::stake_balance(&treasury) == 1_000_000_000, 3);
+        ts::return_shared(treasury);
         ts::return_shared(cfg);
         ts::return_shared(registry);
         ts::return_shared(state);
+    };
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+#[test]
+fun test_fallback_bounty_splits_slashed_stake() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        config::set_fallback_bounty_bps(&mut cfg, 1_000, &cap); // 10%
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let (_id1, _id2) = drive_to_settlement(&mut sc, &mut clock);
+
+    clock.set_for_testing(50_000);
+    ts::next_tx(&mut sc, AUC);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+        settlement::trigger_fallback(
+            &mut state, &mut registry, &cfg, &mut treasury, &clock, ts::ctx(&mut sc),
+        );
+        assert!(reg::stake_of(&registry, SOLVER) == STAKE_AMOUNT - 1_000_000_000, 0);
+        assert!(reiy::treasury::stake_balance(&treasury) == 900_000_000, 1);
+        assert!(reiy::treasury::total_stake_slashed(&treasury) == 1_000_000_000, 2);
+        assert!(reiy::treasury::total_fallback_bounty_paid(&treasury) == 100_000_000, 3);
+        ts::return_shared(treasury);
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+
+    ts::next_tx(&mut sc, AUC);
+    {
+        let bounty = ts::take_from_sender<sui::coin::Coin<SUI>>(&mut sc);
+        assert!(bounty.value() == 100_000_000, 4);
+        h::burn(bounty);
     };
     clock.destroy_for_testing();
     ts::end(sc);
@@ -799,15 +979,17 @@ fun test_multi_bid_in_benchmark_rejected() {
         ts::return_shared(state);
     };
     register_solver(&mut sc, SOLVER);
+    register_solver(&mut sc, AUC);
     ts::next_tx(&mut sc, ADMIN);
     advance(&mut sc, &clock);
     ts::next_tx(&mut sc, SOLVER);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        let registry = ts::take_shared<SolverRegistry>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
         // multi-pair bid (spans two pairs)
-        auction::submit_bid(&mut state, &registry, &cfg,
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
             vector[ida, idb], vector[1_000, 1_000], vector[2_090, 2_090], true, 380, ts::ctx(&mut sc));
         ts::return_shared(cfg);
         ts::return_shared(registry);
@@ -819,7 +1001,11 @@ fun test_multi_bid_in_benchmark_rejected() {
     ts::next_tx(&mut sc, AUC);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
-        auction::submit_pair_benchmark(&mut state, vector[0], ts::ctx(&mut sc)); // bid 0 is multi -> reject
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_pair_benchmark(&mut state, &mut registry, &cfg, vector[0], ts::ctx(&mut sc)); // bid 0 is multi -> reject
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
         ts::return_shared(state);
     };
     clock.destroy_for_testing();

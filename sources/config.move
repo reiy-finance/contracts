@@ -14,7 +14,8 @@ const ROLE_CONFIG_ADMIN: u64 = 0;
 const MAX_FEE_BPS: u64 = 1_000;
 const MAX_SLIPPAGE_BPS: u64 = 2_000;
 const MAX_BPS: u64 = 10_000;
-const MIN_GRIEF_FACTOR_BPS: u64 = 10_000; // bond >= 1.0x griefed score
+const MIN_GRIEF_FACTOR_BPS: u64 = 10_000; // stake >= 1.0x griefed score
+const MAX_FALLBACK_BOUNTY_BPS: u64 = 1_000;
 
 const DEFAULT_COLLECTION_MS: u64 = 10_000;
 const DEFAULT_BID_MS: u64 = 5_000;
@@ -22,9 +23,11 @@ const DEFAULT_SELECTION_MS: u64 = 5_000;
 const DEFAULT_SETTLEMENT_DEADLINE_MS: u64 = 30_000;
 const DEFAULT_MIN_BATCH_COLLECT_MS: u64 = 10_000;
 const DEFAULT_FEE_BPS: u64 = 5;
-const DEFAULT_MIN_BID_BOND: u64 = 1_000_000_000;
+const DEFAULT_MIN_SOLVER_STAKE: u64 = 1_000_000_000;
 const DEFAULT_GRIEF_FACTOR_BPS: u64 = 15_000;
-const DEFAULT_ALLOCATION_BOND: u64 = 1_000_000_000;
+const DEFAULT_ALLOCATION_STAKE: u64 = 1_000_000_000;
+const DEFAULT_BENCHMARK_STAKE: u64 = 1_000_000_000;
+const DEFAULT_FALLBACK_BOUNTY_BPS: u64 = 0;
 const DEFAULT_REWARD_SHARE_BPS: u64 = 2_000;
 const DEFAULT_REWARD_CAP_BPS: u64 = 100;
 const DEFAULT_AUCTIONEER_SHARE_BPS: u64 = 500;
@@ -58,9 +61,11 @@ public struct ACL has store {
 /// * `settlement_deadline_ms`      - Maximum time allowed for settlement after winner selection (ms)
 /// * `min_batch_collect_ms`        - Minimum cooldown between epochs (ms)
 /// * `protocol_fee_bps`            - Protocol fee charged on settled volume (bps)
-/// * `min_bid_bond`                - Minimum SUI bond required to register as a solver
-/// * `grief_factor_bps`            - Bond scaling factor; required bond = max(min, score * grief_factor)
-/// * `required_allocation_bond`    - Bond required to submit an Allocation
+/// * `min_solver_stake`            - Minimum stake required to register and stay bid-eligible
+/// * `grief_factor_bps`            - Stake scaling factor; required stake = max(min, score * grief_factor)
+/// * `required_allocation_stake`   - Stake required to submit an Allocation
+/// * `required_benchmark_stake`    - Stake required to submit a PairBenchmark
+/// * `fallback_bounty_bps`         - Share of slashed stake paid to fallback caller (bps)
 /// * `reward_share_bps`            - Solver reward as a fraction of verified surplus (bps)
 /// * `reward_cap_bps`              - Hard cap on total solver reward as a fraction of settled value (bps)
 /// * `auctioneer_share_bps`        - Auctioneer reward share (bps)
@@ -81,9 +86,11 @@ public struct GlobalConfig has key {
     settlement_deadline_ms: u64,
     min_batch_collect_ms: u64,
     protocol_fee_bps: u64,
-    min_bid_bond: u64,
+    min_solver_stake: u64,
     grief_factor_bps: u64,
-    required_allocation_bond: u64,
+    required_allocation_stake: u64,
+    required_benchmark_stake: u64,
+    fallback_bounty_bps: u64,
     reward_share_bps: u64,
     reward_cap_bps: u64,
     auctioneer_share_bps: u64,
@@ -103,16 +110,18 @@ fun init(ctx: &mut TxContext) {
     acl.members.add(ctx.sender(), vector[ROLE_CONFIG_ADMIN]);
     transfer::share_object(GlobalConfig {
         id: object::new(ctx),
-        version: 2,
+        version: 3,
         collection_duration_ms: DEFAULT_COLLECTION_MS,
         bid_duration_ms: DEFAULT_BID_MS,
         selection_duration_ms: DEFAULT_SELECTION_MS,
         settlement_deadline_ms: DEFAULT_SETTLEMENT_DEADLINE_MS,
         min_batch_collect_ms: DEFAULT_MIN_BATCH_COLLECT_MS,
         protocol_fee_bps: DEFAULT_FEE_BPS,
-        min_bid_bond: DEFAULT_MIN_BID_BOND,
+        min_solver_stake: DEFAULT_MIN_SOLVER_STAKE,
         grief_factor_bps: DEFAULT_GRIEF_FACTOR_BPS,
-        required_allocation_bond: DEFAULT_ALLOCATION_BOND,
+        required_allocation_stake: DEFAULT_ALLOCATION_STAKE,
+        required_benchmark_stake: DEFAULT_BENCHMARK_STAKE,
+        fallback_bounty_bps: DEFAULT_FALLBACK_BOUNTY_BPS,
         reward_share_bps: DEFAULT_REWARD_SHARE_BPS,
         reward_cap_bps: DEFAULT_REWARD_CAP_BPS,
         auctioneer_share_bps: DEFAULT_AUCTIONEER_SHARE_BPS,
@@ -197,9 +206,9 @@ public fun set_protocol_fee(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     set(&mut c.protocol_fee_bps, v, b"protocol_fee_bps");
 }
 
-public fun set_min_bid_bond(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
+public fun set_min_solver_stake(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.min_bid_bond, v, b"min_bid_bond");
+    set(&mut c.min_solver_stake, v, b"min_solver_stake");
 }
 
 public fun set_grief_factor(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
@@ -207,8 +216,17 @@ public fun set_grief_factor(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     set(&mut c.grief_factor_bps, v, b"grief_factor_bps");
 }
 
-public fun set_required_allocation_bond(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    set(&mut c.required_allocation_bond, v, b"required_allocation_bond");
+public fun set_required_allocation_stake(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
+    set(&mut c.required_allocation_stake, v, b"required_allocation_stake");
+}
+
+public fun set_required_benchmark_stake(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
+    set(&mut c.required_benchmark_stake, v, b"required_benchmark_stake");
+}
+
+public fun set_fallback_bounty_bps(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
+    assert!(v <= MAX_FALLBACK_BOUNTY_BPS, EInvalidParam);
+    set(&mut c.fallback_bounty_bps, v, b"fallback_bounty_bps");
 }
 
 public fun set_reward_share(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
@@ -308,11 +326,15 @@ public fun min_batch_collect_ms(c: &GlobalConfig): u64 { c.min_batch_collect_ms 
 
 public fun protocol_fee_bps(c: &GlobalConfig): u64 { c.protocol_fee_bps }
 
-public fun min_bid_bond(c: &GlobalConfig): u64 { c.min_bid_bond }
+public fun min_solver_stake(c: &GlobalConfig): u64 { c.min_solver_stake }
 
 public fun grief_factor_bps(c: &GlobalConfig): u64 { c.grief_factor_bps }
 
-public fun required_allocation_bond(c: &GlobalConfig): u64 { c.required_allocation_bond }
+public fun required_allocation_stake(c: &GlobalConfig): u64 { c.required_allocation_stake }
+
+public fun required_benchmark_stake(c: &GlobalConfig): u64 { c.required_benchmark_stake }
+
+public fun fallback_bounty_bps(c: &GlobalConfig): u64 { c.fallback_bounty_bps }
 
 public fun reward_share_bps(c: &GlobalConfig): u64 { c.reward_share_bps }
 

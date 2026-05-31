@@ -9,7 +9,7 @@ use reiy::events;
 use reiy::intent_book::{Self, Intent};
 use reiy::math;
 use reiy::price_adapter;
-use reiy::solver_registry::{Self, SolverRegistry};
+use reiy::solver_registry::{Self, SolverRegistry, StakeReservationKey};
 use reiy::types::{Self, PairKey};
 use sui::clock::Clock;
 use sui::coin::Coin;
@@ -34,7 +34,7 @@ const EScopeMismatch: vector<u8> = b"declared scope does not match intent set";
 #[error]
 const EOverlappingBids: vector<u8> = b"intents overlap within bid/allocation";
 #[error]
-const EBondTooSmall: vector<u8> = b"available bond below score*grief_factor";
+const EStakeTooSmall: vector<u8> = b"available stake below required amount";
 #[error]
 const ELengthMismatch: vector<u8> = b"input vectors length mismatch";
 #[error]
@@ -54,7 +54,7 @@ const EBidEpsrInconsistent: vector<u8> = b"bid payouts violate uniform ratio wit
 #[error]
 const ESolverNotActive: vector<u8> = b"solver not registered/active";
 #[error]
-const EAllocationBondTooSmall: vector<u8> = b"allocation bond below required";
+const EUseFallbackAfterDeadline: vector<u8> = b"settlement deadline passed; use fallback";
 
 // === Phase ===
 public enum AuctionPhase has copy, drop, store {
@@ -90,7 +90,7 @@ public struct IntentMeta has copy, drop, store {
 /// * `pairs`       - Directed pair of each covered intent parallel to `intents`
 /// * `is_multi`    - True when intents span more than one directed pair
 /// * `score`       - Normalized surplus score committed by the solver
-/// * `bond_locked` - Amount of solver bond implicitly locked by this bid
+/// * `stake_reserved` - Amount of solver stake reserved by this bid
 public struct Bid has drop, store {
     solver: address,
     intents: vector<ID>,
@@ -100,7 +100,7 @@ public struct Bid has drop, store {
     pairs: vector<PairKey>,
     is_multi: bool,
     score: u64,
-    bond_locked: u64,
+    stake_reserved: u64,
 }
 
 /// The best submitted PairBenchmark for a directed pair (argmax by total_score).
@@ -109,22 +109,24 @@ public struct Bid has drop, store {
 /// * `intents`      - Intent IDs covered by this benchmark
 /// * `payouts`      - Per-intent benchmark payouts `bm_i` parallel to `intents`
 public struct BenchmarkEntry has drop, store {
+    seq: u64,
     auctioneer: address,
     total_score: u64,
     intents: vector<ID>,
     payouts: vector<u64>,
+    stake_reserved: u64,
 }
 
 /// A proposed set of Bids competing to be the winning allocation.
 /// * `auctioneer`  - Address that submitted this allocation
 /// * `bid_seqs`    - Indices into `AuctionState.bids` for the constituent bids
 /// * `total_score` - Declared sum of constituent bid scores; verified on-chain
-/// * `bond_locked` - Auctioneer bond staked on this allocation
+/// * `stake_reserved` - Auctioneer stake reserved on this allocation
 public struct Allocation has drop, store {
     auctioneer: address,
     bid_seqs: vector<u64>,
     total_score: u64,
-    bond_locked: u64,
+    stake_reserved: u64,
 }
 
 /// EPSR reference ratio anchored to the first settled intent of a directed pair.
@@ -163,6 +165,8 @@ public struct RatioRef has copy, drop, store {
 /// * `pair_ratio_refs`           - EPSR reference ratio per directed pair set by first settled intent
 /// * `intent_settled`            - IDs of intents already settled; prevents double-consume
 /// * `solver_actual_score`       - Verified score contribution per solver; used for reward split
+/// * `winner_reservation_of`     - Maps each winning intent to its bid/benchmark reservation
+/// * `winning_reservations`      - Reservations retained for settlement close/fallback
 public struct AuctionState has key {
     id: UID,
     current_epoch: u64,
@@ -176,6 +180,7 @@ public struct AuctionState has key {
     requeue_meta: VecMap<ID, IntentMeta>,
     bids: vector<Bid>,
     pair_benchmarks: VecMap<PairKey, BenchmarkEntry>,
+    next_benchmark_seq: u64,
     allocations: vector<Allocation>,
     winner_selected: bool,
     winner_is_fallback: bool,
@@ -190,6 +195,8 @@ public struct AuctionState has key {
     pair_ratio_refs: VecMap<PairKey, RatioRef>,
     intent_settled: VecSet<ID>,
     solver_actual_score: VecMap<address, u64>,
+    winner_reservation_of: VecMap<ID, StakeReservationKey>,
+    winning_reservations: VecSet<StakeReservationKey>,
 }
 
 fun init(ctx: &mut TxContext) {
@@ -210,6 +217,7 @@ fun new_state(ctx: &mut TxContext): AuctionState {
         requeue_meta: vec_map::empty(),
         bids: vector[],
         pair_benchmarks: vec_map::empty(),
+        next_benchmark_seq: 0,
         allocations: vector[],
         winner_selected: false,
         winner_is_fallback: false,
@@ -224,6 +232,8 @@ fun new_state(ctx: &mut TxContext): AuctionState {
         pair_ratio_refs: vec_map::empty(),
         intent_settled: vec_set::empty(),
         solver_actual_score: vec_map::empty(),
+        winner_reservation_of: vec_map::empty(),
+        winning_reservations: vec_set::empty(),
     }
 }
 
@@ -385,7 +395,12 @@ fun can_modify_intent(state: &AuctionState, id: &ID): bool {
 
 // === Phase advancement ===
 
-public fun advance_phase(state: &mut AuctionState, config: &GlobalConfig, clock: &Clock) {
+public fun advance_phase<Stake>(
+    state: &mut AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+    config: &GlobalConfig,
+    clock: &Clock,
+) {
     let now = clock.timestamp_ms();
     let t = phase_tag(&state.phase);
     if (t == 0) {
@@ -402,13 +417,11 @@ public fun advance_phase(state: &mut AuctionState, config: &GlobalConfig, clock:
         }
     } else if (t == 2) {
         if (now >= state.phase_end_ms) {
-            run_selection(state, config, now);
+            run_selection(state, registry, config, now);
         }
     } else if (t == 3) {
         if (now > state.settlement_deadline_ms) {
-            state.phase = AuctionPhase::Failed;
-            state.next_epoch_open_after_ms = now + config.min_batch_collect_ms();
-            emit_phase(state, now);
+            assert!(false, EUseFallbackAfterDeadline);
         }
     } else {
         if (now >= state.next_epoch_open_after_ms) {
@@ -429,6 +442,7 @@ fun start_new_epoch(state: &mut AuctionState, config: &GlobalConfig, now: u64) {
     state.next_epoch_open_after_ms = 0;
     state.bids = vector[];
     state.pair_benchmarks = vec_map::empty();
+    state.next_benchmark_seq = 0;
     state.allocations = vector[];
     state.winner_selected = false;
     state.winner_is_fallback = false;
@@ -443,6 +457,8 @@ fun start_new_epoch(state: &mut AuctionState, config: &GlobalConfig, now: u64) {
     state.pair_ratio_refs = vec_map::empty();
     state.intent_settled = vec_set::empty();
     state.solver_actual_score = vec_map::empty();
+    state.winner_reservation_of = vec_map::empty();
+    state.winning_reservations = vec_set::empty();
     state.batch = vec_set::empty();
     state.intent_meta = vec_map::empty();
     let reqs = state.requeued.into_keys();
@@ -462,9 +478,9 @@ fun start_new_epoch(state: &mut AuctionState, config: &GlobalConfig, now: u64) {
 
 // === Bid submission ===
 
-public fun submit_bid(
+public fun submit_bid<Stake>(
     state: &mut AuctionState,
-    registry: &SolverRegistry,
+    registry: &mut SolverRegistry<Stake>,
     config: &GlobalConfig,
     intent_ids: vector<ID>,
     fills: vector<u64>,
@@ -475,7 +491,7 @@ public fun submit_bid(
 ) {
     assert!(phase_tag(&state.phase) == 1, EWrongPhase);
     let solver = ctx.sender();
-    assert!(solver_registry::is_active(registry, solver), ESolverNotActive);
+    assert!(solver_registry::is_active(registry, config, solver), ESolverNotActive);
 
     let n = intent_ids.length();
     assert!(n > 0, EEmptyIntents);
@@ -505,9 +521,17 @@ public fun submit_bid(
     assert!(is_multi == declared_multi, EScopeMismatch);
     assert_bid_epsr_consistent(&pairs, &payouts, &m_effs);
 
-    let required = required_bid_bond(config, score);
-    assert!(solver_registry::bond_of(registry, solver) >= required, EBondTooSmall);
+    let required = required_bid_stake(config, score);
+    assert!(solver_registry::available_stake_of(registry, solver) >= required, EStakeTooSmall);
 
+    let seq = state.bids.length();
+    solver_registry::reserve_stake(
+        registry,
+        config,
+        solver,
+        solver_registry::bid_reservation_key(state.current_epoch, seq),
+        required,
+    );
     let bid = Bid {
         solver,
         intents: intent_ids,
@@ -517,16 +541,15 @@ public fun submit_bid(
         pairs,
         is_multi,
         score,
-        bond_locked: required,
+        stake_reserved: required,
     };
-    let seq = state.bids.length();
     state.bids.push_back(bid);
     events::emit_bid_submitted(seq, solver, state.current_epoch, is_multi, score, required, n);
 }
 
-fun required_bid_bond(config: &GlobalConfig, score: u64): u64 {
+fun required_bid_stake(config: &GlobalConfig, score: u64): u64 {
     let scaled = math::mul_div_floor(score, config.grief_factor_bps(), math::bps_denom());
-    let min = config.min_bid_bond();
+    let min = config.min_solver_stake();
     if (scaled > min) { scaled } else { min }
 }
 
@@ -573,10 +596,18 @@ fun assert_bid_epsr_consistent(
 
 // === PairBenchmark submission ===
 
-public fun submit_pair_benchmark(state: &mut AuctionState, bid_seqs: vector<u64>, ctx: &TxContext) {
+public fun submit_pair_benchmark<Stake>(
+    state: &mut AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+    config: &GlobalConfig,
+    bid_seqs: vector<u64>,
+    ctx: &TxContext,
+) {
     assert!(phase_tag(&state.phase) == 2, EWrongPhase);
     let m = bid_seqs.length();
     assert!(m > 0, EEmptyIntents);
+    let auctioneer = ctx.sender();
+    assert!(solver_registry::is_active(registry, config, auctioneer), ESolverNotActive);
 
     let mut pair_opt: Option<PairKey> = option::none();
     let mut intents = vector[];
@@ -610,58 +641,107 @@ public fun submit_pair_benchmark(state: &mut AuctionState, bid_seqs: vector<u64>
     };
 
     let pair = *pair_opt.borrow();
-    let entry = BenchmarkEntry { auctioneer: ctx.sender(), total_score, intents, payouts };
+    let required = config.required_benchmark_stake();
     let bid_count = m;
+    let mut accepted = false;
     if (state.pair_benchmarks.contains(&pair)) {
         let existing = state.pair_benchmarks.get(&pair);
         if (total_score > existing.total_score) {
+            let old_key = solver_registry::benchmark_reservation_key(state.current_epoch, existing.seq);
+            solver_registry::release_stake(registry, old_key);
             let (_, _) = state.pair_benchmarks.remove(&pair);
+            let seq = state.next_benchmark_seq;
+            state.next_benchmark_seq = seq + 1;
+            solver_registry::reserve_stake(
+                registry,
+                config,
+                auctioneer,
+                solver_registry::benchmark_reservation_key(state.current_epoch, seq),
+                required,
+            );
+            let entry = BenchmarkEntry {
+                seq,
+                auctioneer,
+                total_score,
+                intents,
+                payouts,
+                stake_reserved: required,
+            };
             state.pair_benchmarks.insert(pair, entry);
+            accepted = true;
         };
     } else {
+        let seq = state.next_benchmark_seq;
+        state.next_benchmark_seq = seq + 1;
+        solver_registry::reserve_stake(
+            registry,
+            config,
+            auctioneer,
+            solver_registry::benchmark_reservation_key(state.current_epoch, seq),
+            required,
+        );
+        let entry = BenchmarkEntry {
+            seq,
+            auctioneer,
+            total_score,
+            intents,
+            payouts,
+            stake_reserved: required,
+        };
         state.pair_benchmarks.insert(pair, entry);
+        accepted = true;
     };
     events::emit_pair_benchmark_submitted(
-        ctx.sender(),
+        auctioneer,
         state.current_epoch,
         pair,
         total_score,
+        if (accepted) required else 0,
         bid_count,
     );
 }
 
 // === Allocation submission ===
 
-public fun submit_allocation(
+public fun submit_allocation<Stake>(
     state: &mut AuctionState,
+    registry: &mut SolverRegistry<Stake>,
     config: &GlobalConfig,
     bid_seqs: vector<u64>,
     total_score: u64,
-    bond: u64,
     ctx: &TxContext,
 ) {
     assert!(phase_tag(&state.phase) == 2, EWrongPhase);
     assert!(bid_seqs.length() > 0, EEmptyIntents);
-    assert!(bond >= config.required_allocation_bond(), EAllocationBondTooSmall);
+    let auctioneer = ctx.sender();
+    assert!(solver_registry::is_active(registry, config, auctioneer), ESolverNotActive);
 
     validate_allocation(state, &bid_seqs, total_score);
 
     let idx = state.allocations.length();
     let bid_count = bid_seqs.length();
+    let required = config.required_allocation_stake();
+    solver_registry::reserve_stake(
+        registry,
+        config,
+        auctioneer,
+        solver_registry::allocation_reservation_key(state.current_epoch, idx),
+        required,
+    );
     state
         .allocations
         .push_back(Allocation {
-            auctioneer: ctx.sender(),
+            auctioneer,
             bid_seqs,
             total_score,
-            bond_locked: bond,
+            stake_reserved: required,
         });
     events::emit_allocation_submitted(
         idx,
-        ctx.sender(),
+        auctioneer,
         state.current_epoch,
         total_score,
-        bond,
+        required,
         bid_count,
     );
 }
@@ -703,7 +783,12 @@ fun max_u64(a: u64, b: u64): u64 { if (a >= b) a else b }
 
 // === Winner selection ===
 
-fun run_selection(state: &mut AuctionState, config: &GlobalConfig, now: u64) {
+fun run_selection<Stake>(
+    state: &mut AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+    config: &GlobalConfig,
+    now: u64,
+) {
     let mut best_idx: Option<u64> = option::none();
     let mut best_score = 0u64;
     let mut i = 0;
@@ -721,12 +806,19 @@ fun run_selection(state: &mut AuctionState, config: &GlobalConfig, now: u64) {
 
     if (best_idx.is_some()) {
         let idx = *best_idx.borrow();
+        let winning_bid_seqs = state.allocations[idx].bid_seqs;
         commit_winner_from_allocation(state, idx, config);
+        release_bid_reservations_except(state, registry, &winning_bid_seqs);
+        release_all_allocation_reservations(state, registry);
+        release_all_benchmark_reservations(state, registry);
         state.winner_is_fallback = false;
     } else if (state.pair_benchmarks.length() > 0) {
         commit_winner_from_benchmarks(state, config);
+        release_all_bid_reservations(state, registry);
+        release_all_allocation_reservations(state, registry);
         state.winner_is_fallback = true;
     } else {
+        release_all_open_reservations(state, registry);
         state.phase = AuctionPhase::Aborted;
         state.next_epoch_open_after_ms = now + config.min_batch_collect_ms();
         emit_phase(state, now);
@@ -786,7 +878,8 @@ fun commit_winner_from_allocation(
         let payouts = state.bids[seq].payouts;
         let m_effs = state.bids[seq].m_effs;
         let pairs = state.bids[seq].pairs;
-        commit_bid_intents(state, solver, &intents, &payouts, &m_effs, &pairs);
+        let reservation_key = solver_registry::bid_reservation_key(state.current_epoch, seq);
+        commit_bid_intents(state, solver, reservation_key, &intents, &payouts, &m_effs, &pairs);
         i = i + 1;
     };
 }
@@ -800,6 +893,7 @@ fun commit_winner_from_benchmarks(state: &mut AuctionState, _config: &GlobalConf
         let pair = pairs[i];
         let entry = state.pair_benchmarks.get(&pair);
         let auctioneer = entry.auctioneer;
+        let reservation_key = solver_registry::benchmark_reservation_key(state.current_epoch, entry.seq);
         let intents = entry.intents;
         let payouts = entry.payouts;
         total = total + entry.total_score;
@@ -814,7 +908,7 @@ fun commit_winner_from_benchmarks(state: &mut AuctionState, _config: &GlobalConf
             pks.push_back(meta.pair);
             j = j + 1;
         };
-        commit_bid_intents(state, auctioneer, &intents, &payouts, &m_effs, &pks);
+        commit_bid_intents(state, auctioneer, reservation_key, &intents, &payouts, &m_effs, &pks);
         i = i + 1;
     };
     state.committed_total_score = total;
@@ -823,6 +917,7 @@ fun commit_winner_from_benchmarks(state: &mut AuctionState, _config: &GlobalConf
 fun commit_bid_intents(
     state: &mut AuctionState,
     solver: address,
+    reservation_key: StakeReservationKey,
     intents: &vector<ID>,
     payouts: &vector<u64>,
     m_effs: &vector<u64>,
@@ -836,12 +931,83 @@ fun commit_bid_intents(
         let floor = max_u64(m_effs[i], bm);
         state.winner_intents.insert(id);
         state.winner_solver_of.insert(id, solver);
+        state.winner_reservation_of.insert(id, reservation_key);
         state.intent_floor.insert(id, floor);
+        if (!state.winning_reservations.contains(&reservation_key)) {
+            state.winning_reservations.insert(reservation_key);
+        };
         if (!state.committed_k_by_pair.contains(&pairs[i])) {
             state.committed_k_by_pair.insert(pairs[i], math::fixed_ratio(payouts[i], floor));
         };
         i = i + 1;
     };
+}
+
+fun release_bid_reservations_except<Stake>(
+    state: &AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+    keep: &vector<u64>,
+) {
+    let mut i = 0;
+    let n = state.bids.length();
+    while (i < n) {
+        if (!keep.contains(&i)) {
+            solver_registry::release_stake(
+                registry,
+                solver_registry::bid_reservation_key(state.current_epoch, i),
+            );
+        };
+        i = i + 1;
+    };
+}
+
+fun release_all_bid_reservations<Stake>(
+    state: &AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+) {
+    let empty = vector[];
+    release_bid_reservations_except(state, registry, &empty);
+}
+
+fun release_all_allocation_reservations<Stake>(
+    state: &AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+) {
+    let mut i = 0;
+    let n = state.allocations.length();
+    while (i < n) {
+        solver_registry::release_stake(
+            registry,
+            solver_registry::allocation_reservation_key(state.current_epoch, i),
+        );
+        i = i + 1;
+    };
+}
+
+fun release_all_benchmark_reservations<Stake>(
+    state: &AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+) {
+    let pairs = state.pair_benchmarks.keys();
+    let mut i = 0;
+    let n = pairs.length();
+    while (i < n) {
+        let entry = state.pair_benchmarks.get(&pairs[i]);
+        solver_registry::release_stake(
+            registry,
+            solver_registry::benchmark_reservation_key(state.current_epoch, entry.seq),
+        );
+        i = i + 1;
+    };
+}
+
+fun release_all_open_reservations<Stake>(
+    state: &AuctionState,
+    registry: &mut SolverRegistry<Stake>,
+) {
+    release_all_bid_reservations(state, registry);
+    release_all_allocation_reservations(state, registry);
+    release_all_benchmark_reservations(state, registry);
 }
 
 // === Package accessors ===
@@ -856,6 +1022,13 @@ public(package) fun is_winner_intent(state: &AuctionState, id: &ID): bool {
 
 public(package) fun solver_of_intent(state: &AuctionState, id: &ID): address {
     *state.winner_solver_of.get(id)
+}
+
+public(package) fun reservation_of_intent(
+    state: &AuctionState,
+    id: &ID,
+): StakeReservationKey {
+    *state.winner_reservation_of.get(id)
 }
 
 public(package) fun floor_of_intent(state: &AuctionState, id: &ID): u64 {
@@ -979,6 +1152,10 @@ public(package) fun set_failed(state: &mut AuctionState, config: &GlobalConfig, 
 
 public(package) fun winner_intent_ids(state: &AuctionState): vector<ID> {
     state.winner_intents.into_keys()
+}
+
+public(package) fun winning_reservation_keys(state: &AuctionState): vector<StakeReservationKey> {
+    state.winning_reservations.into_keys()
 }
 
 public(package) fun all_winners_settled(state: &AuctionState): bool {

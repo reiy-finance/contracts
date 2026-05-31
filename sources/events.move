@@ -65,7 +65,7 @@ public struct BidSubmittedEvent has copy, drop {
     epoch: u64,
     scope_is_multi: bool,
     score: u64,
-    bond_locked: u64,
+    stake_reserved: u64,
     intent_count: u64,
 }
 
@@ -74,6 +74,7 @@ public struct PairBenchmarkSubmittedEvent has copy, drop {
     epoch: u64,
     pair: PairKey,
     total_score: u64,
+    stake_reserved: u64,
     bid_count: u64,
 }
 
@@ -82,7 +83,7 @@ public struct AllocationSubmittedEvent has copy, drop {
     auctioneer: address,
     epoch: u64,
     total_score: u64,
-    bond_locked: u64,
+    stake_reserved: u64,
     bid_count: u64,
 }
 
@@ -119,18 +120,23 @@ public struct ProtocolFeeCollectedEvent has copy, drop {
 
 public struct SolverRegisteredEvent has copy, drop {
     solver: address,
-    bond_amount: u64,
+    stake_amount: u64,
 }
 
 public struct SolverDeregisteredEvent has copy, drop {
     solver: address,
-    returned_bond: u64,
+    returned_stake: u64,
 }
 
 public struct SolverSlashedEvent has copy, drop {
     solver: address,
     amount_slashed: u64,
     reason: u8, // 0=timeout, 1=invalid proof, 2=repeated
+}
+
+public struct StakeSlashDepositedEvent has copy, drop {
+    epoch: u64,
+    amount: u64,
 }
 
 public struct FallbackTriggeredEvent has copy, drop {
@@ -220,7 +226,7 @@ public(package) fun emit_bid_submitted(
     epoch: u64,
     scope_is_multi: bool,
     score: u64,
-    bond_locked: u64,
+    stake_reserved: u64,
     intent_count: u64,
 ) {
     event::emit(BidSubmittedEvent {
@@ -229,7 +235,7 @@ public(package) fun emit_bid_submitted(
         epoch,
         scope_is_multi,
         score,
-        bond_locked,
+        stake_reserved,
         intent_count,
     });
 }
@@ -239,9 +245,17 @@ public(package) fun emit_pair_benchmark_submitted(
     epoch: u64,
     pair: PairKey,
     total_score: u64,
+    stake_reserved: u64,
     bid_count: u64,
 ) {
-    event::emit(PairBenchmarkSubmittedEvent { auctioneer, epoch, pair, total_score, bid_count });
+    event::emit(PairBenchmarkSubmittedEvent {
+        auctioneer,
+        epoch,
+        pair,
+        total_score,
+        stake_reserved,
+        bid_count,
+    });
 }
 
 public(package) fun emit_allocation_submitted(
@@ -249,7 +263,7 @@ public(package) fun emit_allocation_submitted(
     auctioneer: address,
     epoch: u64,
     total_score: u64,
-    bond_locked: u64,
+    stake_reserved: u64,
     bid_count: u64,
 ) {
     event::emit(AllocationSubmittedEvent {
@@ -257,7 +271,7 @@ public(package) fun emit_allocation_submitted(
         auctioneer,
         epoch,
         total_score,
-        bond_locked,
+        stake_reserved,
         bid_count,
     });
 }
@@ -318,12 +332,16 @@ public(package) fun emit_protocol_fee_collected(epoch: u64, amount: u64) {
     event::emit(ProtocolFeeCollectedEvent { epoch, amount });
 }
 
-public(package) fun emit_solver_registered(solver: address, bond_amount: u64) {
-    event::emit(SolverRegisteredEvent { solver, bond_amount });
+public(package) fun emit_stake_slash_deposited(epoch: u64, amount: u64) {
+    event::emit(StakeSlashDepositedEvent { epoch, amount });
 }
 
-public(package) fun emit_solver_deregistered(solver: address, returned_bond: u64) {
-    event::emit(SolverDeregisteredEvent { solver, returned_bond });
+public(package) fun emit_solver_registered(solver: address, stake_amount: u64) {
+    event::emit(SolverRegisteredEvent { solver, stake_amount });
+}
+
+public(package) fun emit_solver_deregistered(solver: address, returned_stake: u64) {
+    event::emit(SolverDeregisteredEvent { solver, returned_stake });
 }
 
 public(package) fun emit_solver_slashed(solver: address, amount_slashed: u64, reason: u8) {
