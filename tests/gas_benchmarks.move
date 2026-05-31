@@ -72,15 +72,13 @@ fun settle_next(sc: &mut Scenario, payout: u64, clock: &Clock) {
     ts::next_tx(sc, SOLVER);
     let mut state    = ts::take_shared<AuctionState>(sc);
     let mut registry = ts::take_shared<SolverRegistry>(sc);
-    let cfg          = ts::take_shared<GlobalConfig>(sc);
     let intent       = ts::take_shared<reiy::intent_book::Intent<TOKA, USDC>>(sc);
     let (sell_coin, receipt) = settlement::take_intent_full(&mut state, intent, clock, ts::ctx(sc));
     h::burn(sell_coin);
     settlement::settle_intent_with_values_for_testing(
-        &mut state, &mut registry, &cfg, receipt,
+        &mut state, &mut registry, receipt,
         h::mint<USDC>(payout, ts::ctx(sc)), payout, payout,
     );
-    ts::return_shared(cfg);
     ts::return_shared(registry);
     ts::return_shared(state);
 }

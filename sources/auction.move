@@ -128,7 +128,7 @@ public struct Allocation has drop, store {
 }
 
 /// EPSR reference ratio anchored to the first settled intent of a directed pair.
-/// Subsequent intents in the same pair must satisfy the cross-multiplication tolerance against this.
+/// Subsequent intents in the same pair must match this ratio exactly.
 /// * `floor_ref`  - Benchmark floor of the reference intent
 /// * `payout_ref` - Net payout of the reference intent
 public struct RatioRef has copy, drop, store {
@@ -503,7 +503,7 @@ public fun submit_bid(
 
     let is_multi = distinct_pair_count(&pairs) > 1;
     assert!(is_multi == declared_multi, EScopeMismatch);
-    assert_bid_epsr_consistent(&pairs, &payouts, &m_effs, config.epsr_tolerance_bps());
+    assert_bid_epsr_consistent(&pairs, &payouts, &m_effs);
 
     let required = required_bid_bond(config, score);
     assert!(solver_registry::bond_of(registry, solver) >= required, EBondTooSmall);
@@ -542,12 +542,11 @@ fun distinct_pair_count(pairs: &vector<PairKey>): u64 {
 }
 
 /// Within each directed pair covered by the bid, all (payout, m_eff) must share the same
-/// proportional ratio within tolerance (the bid is internally EPSR-consistent).
+/// exact proportional ratio (the bid is internally EPSR-consistent).
 fun assert_bid_epsr_consistent(
     pairs: &vector<PairKey>,
     payouts: &vector<u64>,
     m_effs: &vector<u64>,
-    eps_bps: u64,
 ) {
     let n = pairs.length();
     let mut refs = vec_map::empty<PairKey, RatioRef>();
@@ -557,12 +556,11 @@ fun assert_bid_epsr_consistent(
         if (refs.contains(&p)) {
             let r = refs.get(&p);
             assert!(
-                math::cross_ratio_within_tolerance(
+                math::cross_ratio_equal(
                     payouts[i],
                     m_effs[i],
                     r.payout_ref,
                     r.floor_ref,
-                    eps_bps,
                 ),
                 EBidEpsrInconsistent,
             );
@@ -899,12 +897,11 @@ public(package) fun record_settlement(
     floor: u64,
     score_value: u64,
     floor_value: u64,
-    eps_bps: u64,
 ) {
     if (state.pair_ratio_refs.contains(&pair)) {
         let r = state.pair_ratio_refs.get(&pair);
         assert!(
-            math::cross_ratio_within_tolerance(payout, floor, r.payout_ref, r.floor_ref, eps_bps),
+            math::cross_ratio_equal(payout, floor, r.payout_ref, r.floor_ref),
             EBidEpsrInconsistent,
         );
     } else {

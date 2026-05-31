@@ -104,14 +104,12 @@ public struct SettlementEvent has copy, drop {
     settlement_type: u8,
 }
 
-public struct SettlementCompleteEventV2 has copy, drop {
+public struct SettlementCompleteEventV3 has copy, drop {
     epoch: u64,
     actual_score_surplus: u64,
     committed_score: u64,
     settled_intent_count: u64,
     settled_score_value_sum: u64,
-    score_tolerance_bps: u64,
-    k_tolerance_bps: u64,
 }
 
 public struct ProtocolFeeCollectedEvent has copy, drop {
@@ -306,17 +304,13 @@ public(package) fun emit_settlement_complete(
     committed_score: u64,
     settled_intent_count: u64,
     settled_score_value_sum: u64,
-    score_tolerance_bps: u64,
-    k_tolerance_bps: u64,
 ) {
-    event::emit(SettlementCompleteEventV2 {
+    event::emit(SettlementCompleteEventV3 {
         epoch,
         actual_score_surplus,
         committed_score,
         settled_intent_count,
         settled_score_value_sum,
-        score_tolerance_bps,
-        k_tolerance_bps,
     });
 }
 

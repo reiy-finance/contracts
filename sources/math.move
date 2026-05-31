@@ -37,24 +37,15 @@ public fun fixed_ratio(numerator: u64, denominator: u64): u64 {
     to_u64((numerator as u128) * K_SCALE / (denominator as u128))
 }
 
-/// EPSR cross-multiplication check: `|p_i*floor_ref - p_ref*floor_i| <= eps_bps*floor_ref*floor_i/10_000`.
-public fun cross_ratio_within_tolerance(
+/// EPSR cross-multiplication check with no tolerance:
+/// `p_i / floor_i == p_ref / floor_ref`.
+public fun cross_ratio_equal(
     p_i: u64,
     floor_i: u64,
     p_ref: u64,
     floor_ref: u64,
-    eps_bps: u64,
 ): bool {
-    let diff = abs_diff_u128(
-        (p_i as u128) * (floor_ref as u128),
-        (p_ref as u128) * (floor_i as u128),
-    );
-    diff <= (eps_bps as u128) * (floor_ref as u128) * (floor_i as u128) / BPS_DENOM
-}
-
-/// True iff `value >= reference * tol_bps / 10_000`.
-public fun at_least_bps(value: u64, reference: u64, tol_bps: u64): bool {
-    (value as u128) >= (reference as u128) * (tol_bps as u128) / BPS_DENOM
+    (p_i as u128) * (floor_ref as u128) == (p_ref as u128) * (floor_i as u128)
 }
 
 public fun to_u64(x: u128): u64 {

@@ -32,9 +32,6 @@ const DEFAULT_AUCTIONEER_REWARD_CAP: u64 = 1_000_000_000;
 const DEFAULT_MAX_SLIPPAGE_BPS: u64 = 500;
 const DEFAULT_MIN_SBBO_MID_PRICE: u64 = 1;
 const DEFAULT_PRICE_ORACLE_MAX_AGE_MS: u64 = 60_000;
-const DEFAULT_EPSR_TOLERANCE_BPS: u64 = 5;
-const DEFAULT_K_TOLERANCE_BPS: u64 = 9_500;
-const DEFAULT_SCORE_TOLERANCE_BPS: u64 = 9_500;
 
 #[error]
 const ENotAdmin: vector<u8> = b"caller lacks ROLE_CONFIG_ADMIN";
@@ -71,9 +68,6 @@ public struct ACL has store {
 /// * `max_slippage_tolerance_bps`  - Maximum allowed slippage tolerance per intent submission (bps)
 /// * `min_sbbo_mid_price`          - Minimum acceptable DeepBook mid price; zero price is rejected
 /// * `price_oracle_max_age_ms`     - Maximum acceptable age of a price observation (ms)
-/// * `epsr_tolerance_bps`          - Per-intent EPSR cross-multiplication tolerance (bps)
-/// * `k_tolerance_bps`             - Batch-level tolerance for actual k vs committed k (bps)
-/// * `score_tolerance_bps`         - Batch-level tolerance for actual score vs committed score (bps)
 /// * `supported_pairs`             - Allowlist of directed pairs accepted for intent submission
 /// * `numeraire_pools`             - Map from buy-token type to its DeepBook numeraire pool ID
 /// * `numeraire_type`              - The protocol numeraire token type (e.g. USDC)
@@ -97,9 +91,6 @@ public struct GlobalConfig has key {
     max_slippage_tolerance_bps: u64,
     min_sbbo_mid_price: u64,
     price_oracle_max_age_ms: u64,
-    epsr_tolerance_bps: u64,
-    k_tolerance_bps: u64,
-    score_tolerance_bps: u64,
     supported_pairs: VecSet<PairKey>,
     numeraire_pools: VecMap<TypeName, ID>,
     numeraire_type: Option<TypeName>,
@@ -112,7 +103,7 @@ fun init(ctx: &mut TxContext) {
     acl.members.add(ctx.sender(), vector[ROLE_CONFIG_ADMIN]);
     transfer::share_object(GlobalConfig {
         id: object::new(ctx),
-        version: 1,
+        version: 2,
         collection_duration_ms: DEFAULT_COLLECTION_MS,
         bid_duration_ms: DEFAULT_BID_MS,
         selection_duration_ms: DEFAULT_SELECTION_MS,
@@ -129,9 +120,6 @@ fun init(ctx: &mut TxContext) {
         max_slippage_tolerance_bps: DEFAULT_MAX_SLIPPAGE_BPS,
         min_sbbo_mid_price: DEFAULT_MIN_SBBO_MID_PRICE,
         price_oracle_max_age_ms: DEFAULT_PRICE_ORACLE_MAX_AGE_MS,
-        epsr_tolerance_bps: DEFAULT_EPSR_TOLERANCE_BPS,
-        k_tolerance_bps: DEFAULT_K_TOLERANCE_BPS,
-        score_tolerance_bps: DEFAULT_SCORE_TOLERANCE_BPS,
         supported_pairs: vec_set::empty(),
         numeraire_pools: vec_map::empty(),
         numeraire_type: option::none(),
@@ -256,21 +244,6 @@ public fun set_price_oracle_max_age(c: &mut GlobalConfig, v: u64, _: &AdminCap) 
     set(&mut c.price_oracle_max_age_ms, v, b"price_oracle_max_age_ms");
 }
 
-public fun set_epsr_tolerance(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    assert!(v <= MAX_BPS, EInvalidParam);
-    set(&mut c.epsr_tolerance_bps, v, b"epsr_tolerance_bps");
-}
-
-public fun set_k_tolerance(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    assert!(v > 0 && v <= MAX_BPS, EInvalidParam);
-    set(&mut c.k_tolerance_bps, v, b"k_tolerance_bps");
-}
-
-public fun set_score_tolerance(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    assert!(v > 0 && v <= MAX_BPS, EInvalidParam);
-    set(&mut c.score_tolerance_bps, v, b"score_tolerance_bps");
-}
-
 // === Allowlists ===
 
 public fun add_supported_pair<Sell, Buy>(c: &mut GlobalConfig, _: &AdminCap) {
@@ -354,12 +327,6 @@ public fun max_slippage_tolerance_bps(c: &GlobalConfig): u64 { c.max_slippage_to
 public fun min_sbbo_mid_price(c: &GlobalConfig): u64 { c.min_sbbo_mid_price }
 
 public fun price_oracle_max_age_ms(c: &GlobalConfig): u64 { c.price_oracle_max_age_ms }
-
-public fun epsr_tolerance_bps(c: &GlobalConfig): u64 { c.epsr_tolerance_bps }
-
-public fun k_tolerance_bps(c: &GlobalConfig): u64 { c.k_tolerance_bps }
-
-public fun score_tolerance_bps(c: &GlobalConfig): u64 { c.score_tolerance_bps }
 
 // === Test-only ===
 

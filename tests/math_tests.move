@@ -41,20 +41,10 @@ fun test_fixed_ratio() {
 }
 
 #[test]
-fun test_cross_ratio_within_tolerance() {
-    // identical ratios -> within any tolerance
-    assert!(math::cross_ratio_within_tolerance(105, 100, 210, 200, 0), 0);
-    // 1.05 vs 1.06 -> outside tight tolerance
-    assert!(!math::cross_ratio_within_tolerance(106, 100, 105, 100, 1), 1);
-    // small deviation within generous tolerance
-    assert!(math::cross_ratio_within_tolerance(10501, 10000, 105, 100, 100), 2);
-}
-
-#[test]
-fun test_at_least_bps() {
-    assert!(math::at_least_bps(95, 100, 9_500), 0);  // exactly 95%
-    assert!(!math::at_least_bps(94, 100, 9_500), 1); // below
-    assert!(math::at_least_bps(100, 100, 10_000), 2);
+fun test_cross_ratio_equal() {
+    assert!(math::cross_ratio_equal(105, 100, 210, 200), 0);
+    assert!(!math::cross_ratio_equal(106, 100, 105, 100), 1);
+    assert!(!math::cross_ratio_equal(10501, 10000, 105, 100), 2);
 }
 
 #[test]

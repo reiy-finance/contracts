@@ -16,9 +16,8 @@ fun test_defaults() {
     ts::next_tx(&mut sc, ADMIN);
     {
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        assert!(config::protocol_fee_bps(&cfg) == 5, 0);
-        assert!(config::k_tolerance_bps(&cfg) == 9_500, 1);
-        assert!(config::score_tolerance_bps(&cfg) == 9_500, 2);
+        assert!(config::version(&cfg) == 2, 0);
+        assert!(config::protocol_fee_bps(&cfg) == 5, 1);
         assert!(config::max_slippage_tolerance_bps(&cfg) == 500, 3);
         assert!(config::grief_factor_bps(&cfg) == 15_000, 4);
         ts::return_shared(cfg);

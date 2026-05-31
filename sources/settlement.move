@@ -38,9 +38,9 @@ const ENotNumeraire: vector<u8> = b"buy token is not the configured numeraire";
 #[error]
 const EZeroSettlement: vector<u8> = b"no intents settled";
 #[error]
-const EScoreMismatch: vector<u8> = b"actual score below committed threshold";
+const EScoreMismatch: vector<u8> = b"actual score below committed score";
 #[error]
-const EKMismatch: vector<u8> = b"actual k below committed threshold";
+const EKMismatch: vector<u8> = b"actual k below committed k";
 #[error]
 const ENotAllSettled: vector<u8> = b"not all winning intents settled";
 #[error]
@@ -155,7 +155,7 @@ public fun settle_intent_numeraire<Sell, Buy>(
     assert!(type_name::with_defining_ids<Buy>() == config.numeraire_type(), ENotNumeraire);
     let net = payout.value();
     let (raw_surplus, floor) = verify_payout(&receipt, net);
-    finalize_settlement(state, registry, config, receipt, payout, raw_surplus, floor);
+    finalize_settlement(state, registry, receipt, payout, raw_surplus, floor);
 }
 
 /// Settle a winning intent, normalizing its surplus into numeraire units using the allowlisted
@@ -186,7 +186,6 @@ public fun settle_intent<Sell, Buy, NumBase, NumQuote>(
     finalize_settlement_normalized(
         state,
         registry,
-        config,
         receipt,
         payout,
         raw_surplus,
@@ -231,7 +230,6 @@ fun normalize_surplus<Buy, NumBase, NumQuote>(
 fun finalize_settlement<Sell, Buy>(
     state: &mut AuctionState,
     registry: &mut SolverRegistry,
-    config: &GlobalConfig,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
     raw_surplus: u64,
@@ -241,7 +239,6 @@ fun finalize_settlement<Sell, Buy>(
     finalize_settlement_normalized(
         state,
         registry,
-        config,
         receipt,
         payout,
         raw_surplus,
@@ -254,7 +251,6 @@ fun finalize_settlement<Sell, Buy>(
 fun finalize_settlement_normalized<Sell, Buy>(
     state: &mut AuctionState,
     registry: &mut SolverRegistry,
-    config: &GlobalConfig,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
     raw_surplus: u64,
@@ -273,7 +269,6 @@ fun finalize_settlement_normalized<Sell, Buy>(
         floor,
         score_value,
         floor_value,
-        config.epsr_tolerance_bps(),
     );
     auction::mark_intent_settled(state, intent_id);
     solver_registry::record_settled(registry, solver, net);
@@ -314,10 +309,7 @@ public fun close_batch<N>(
 
     let actual_score = auction::current_epoch_score_surplus(state);
     let committed_score = auction::committed_total_score(state);
-    assert!(
-        math::at_least_bps(actual_score, committed_score, config.score_tolerance_bps()),
-        EScoreMismatch,
-    );
+    assert!(actual_score >= committed_score, EScoreMismatch);
 
     let pairs = auction::committed_pairs(state);
     let mut i = 0;
@@ -326,7 +318,7 @@ public fun close_batch<N>(
         let pair = pairs[i];
         let actual_k = auction::actual_k_of_pair(state, &pair);
         let committed_k = auction::committed_k_of_pair(state, &pair);
-        assert!(math::at_least_bps(actual_k, committed_k, config.k_tolerance_bps()), EKMismatch);
+        assert!(actual_k >= committed_k, EKMismatch);
         i = i + 1;
     };
 
@@ -352,8 +344,6 @@ public fun close_batch<N>(
         committed_score,
         settled,
         value_sum,
-        config.score_tolerance_bps(),
-        config.k_tolerance_bps(),
     );
 
     auction::set_closed(state, config, clock);
@@ -458,7 +448,6 @@ public fun trigger_fallback(
 public fun settle_intent_with_values_for_testing<Sell, Buy>(
     state: &mut AuctionState,
     registry: &mut SolverRegistry,
-    config: &GlobalConfig,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
     score_value: u64,
@@ -469,7 +458,6 @@ public fun settle_intent_with_values_for_testing<Sell, Buy>(
     finalize_settlement_normalized(
         state,
         registry,
-        config,
         receipt,
         payout,
         raw_surplus,
