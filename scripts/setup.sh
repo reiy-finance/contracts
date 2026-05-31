@@ -85,8 +85,26 @@ add_numeraire_pool_if_set() {
 
 echo ""
 echo "Step 3: add_numeraire_pool ..."
-add_numeraire_pool_if_set "WSUI -> WUSDC" "${WSUI_TYPE:-}" "${DEEPBOOK_WSUI_WUSDC_POOL:-}"
-add_numeraire_pool_if_set "WDEEP -> WUSDC" "${WDEEP_TYPE:-}" "${DEEPBOOK_WDEEP_WUSDC_POOL:-}"
+if [[ -n "${NUMERAIRE_POOLS:-}" ]]; then
+  for ENTRY in $NUMERAIRE_POOLS; do
+    if [[ "$ENTRY" == *"|"* ]]; then
+      TOKEN_TYPE=${ENTRY%%|*}
+      POOL_ID=${ENTRY#*|}
+    elif [[ "$ENTRY" == *":0x"* ]]; then
+      TOKEN_TYPE=${ENTRY%%:0x*}
+      POOL_ID=0x${ENTRY#*:0x}
+    else
+      echo "ERROR: unsupported numeraire pool format: $ENTRY" >&2
+      echo "Use TOKEN_TYPE|POOL_ID" >&2
+      exit 1
+    fi
+
+    add_numeraire_pool_if_set "$TOKEN_TYPE" "$TOKEN_TYPE" "$POOL_ID"
+  done
+else
+  add_numeraire_pool_if_set "WSUI -> WUSDC" "${WSUI_TYPE:-}" "${DEEPBOOK_WSUI_WUSDC_POOL:-}"
+  add_numeraire_pool_if_set "WDEEP -> WUSDC" "${WDEEP_TYPE:-}" "${DEEPBOOK_WDEEP_WUSDC_POOL:-}"
+fi
 
 # ---- 4. add_supported_pairs ----
 echo ""

@@ -5,8 +5,9 @@ version = "0.1.0"
 license = "MIT"
 
 [dependencies]
-# DeepBook v3 — pinned to the mainnet revision (do NOT use rev = "main"; mainnet builds must be reproducible).
-deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "663edbf9c30d6c93100e6cd66936e1487a5dc9e0" }
+# DeepBook v3 — pinned to the documented testnet-v15 deployment.
+# Do not use rev = "main"; package linkage must match the registry/pools used on-chain.
+deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "0df26919ab7582e32b212ce555261b4fddfc878c" }
 
 [addresses]
 reiy = "0x0"
