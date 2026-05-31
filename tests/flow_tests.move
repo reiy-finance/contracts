@@ -950,6 +950,134 @@ fun test_fallback_bounty_splits_slashed_stake() {
     ts::end(sc);
 }
 
+#[test]
+#[expected_failure(abort_code = reiy::settlement::ESettlementDeadlinePassed)]
+fun test_take_after_settlement_deadline_aborts() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let (id1, _id2) = drive_to_settlement(&mut sc, &mut clock);
+
+    clock.set_for_testing(50_000);
+    ts::next_tx(&mut sc, SOLVER);
+    let mut state = ts::take_shared<AuctionState>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+    let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+    let intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id1);
+    let (sell, receipt) = settlement::take_intent_full(&mut state, intent, &clock, ts::ctx(&mut sc));
+    settlement::settle_intent_numeraire(
+        &mut state, &mut registry, &cfg, receipt, h::mint<USDC>(4_180, ts::ctx(&mut sc)),
+    );
+    h::burn(sell);
+    ts::return_shared(cfg);
+    ts::return_shared(registry);
+    ts::return_shared(state);
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+#[test]
+#[expected_failure(abort_code = reiy::settlement::EAllWinnersSettled)]
+fun test_fallback_after_all_winners_settled_aborts() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let (id1, id2) = drive_to_settlement(&mut sc, &mut clock);
+
+    settle_one(&mut sc, id1, 4_180, &clock);
+    settle_one(&mut sc, id2, 2_090, &clock);
+
+    clock.set_for_testing(50_000);
+    ts::next_tx(&mut sc, AUC);
+    let mut state = ts::take_shared<AuctionState>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+    let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+    let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+    settlement::trigger_fallback(
+        &mut state, &mut registry, &cfg, &mut treasury, &clock, ts::ctx(&mut sc),
+    );
+    ts::return_shared(treasury);
+    ts::return_shared(cfg);
+    ts::return_shared(registry);
+    ts::return_shared(state);
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+#[test]
+fun test_close_after_deadline_if_already_settled() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let (id1, id2) = drive_to_settlement(&mut sc, &mut clock);
+
+    settle_one(&mut sc, id1, 4_180, &clock);
+    settle_one(&mut sc, id2, 2_090, &clock);
+
+    clock.set_for_testing(50_000);
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+        settlement::close_batch(
+            &mut state, &cfg, &mut registry, &mut treasury,
+            h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc),
+        );
+        assert!(auction::phase_code(&state) == 4, 0);
+        assert!(reg::reserved_stake_of(&registry, SOLVER) == 0, 1);
+        ts::return_shared(treasury);
+        ts::return_shared(registry);
+        ts::return_shared(cfg);
+        ts::return_shared(state);
+    };
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+#[test]
+#[expected_failure(abort_code = reiy::settlement::ETreasuryNumeraireMismatch)]
+fun test_close_wrong_treasury_numeraire_aborts() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        config::set_numeraire<TOKA>(&mut cfg, &cap);
+        reiy::treasury::init_treasury<TOKA, SUI>(&cfg, &cap, ts::ctx(&mut sc));
+        config::set_numeraire<USDC>(&mut cfg, &cap);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
+
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let (id1, id2) = drive_to_settlement(&mut sc, &mut clock);
+    settle_one(&mut sc, id1, 4_180, &clock);
+    settle_one(&mut sc, id2, 2_090, &clock);
+
+    ts::next_tx(&mut sc, SOLVER);
+    let mut state = ts::take_shared<AuctionState>(&mut sc);
+    let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+    let mut treasury = ts::take_shared<ProtocolTreasury<TOKA, SUI>>(&mut sc);
+    settlement::close_batch(
+        &mut state, &cfg, &mut registry, &mut treasury,
+        h::mint<TOKA>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc),
+    );
+    ts::return_shared(treasury);
+    ts::return_shared(registry);
+    ts::return_shared(cfg);
+    ts::return_shared(state);
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
 // === Multi-pair bid cannot be a benchmark ===
 
 #[test]

@@ -47,6 +47,12 @@ const ENotAllSettled: vector<u8> = b"not all winning intents settled";
 const EFeeTooSmall: vector<u8> = b"protocol fee below required";
 #[error]
 const ETooEarly: vector<u8> = b"settlement deadline not yet passed";
+#[error]
+const ESettlementDeadlinePassed: vector<u8> = b"settlement deadline has passed";
+#[error]
+const EAllWinnersSettled: vector<u8> = b"all winning intents already settled";
+#[error]
+const ETreasuryNumeraireMismatch: vector<u8> = b"treasury numeraire does not match config";
 
 /// Hot-potato receipt created by `take_intent_*` and consumed by `settle_*` in the same PTB.
 /// * `intent_id`   - ID of the intent being settled
@@ -77,6 +83,7 @@ public fun take_intent_full<Sell, Buy>(
     ctx: &mut TxContext,
 ): (Coin<Sell>, SettlementReceipt<Sell, Buy>) {
     auction::assert_settlement_phase(state);
+    assert_settlement_deadline_open(state, clock);
     let id = intent.intent_id();
     assert!(auction::is_winner_intent(state, &id), ENotInWinningSet);
     assert!(!auction::is_intent_settled(state, &id), EAlreadySettled);
@@ -109,6 +116,7 @@ public fun take_intent_partial<Sell, Buy>(
     ctx: &mut TxContext,
 ): (Coin<Sell>, SettlementReceipt<Sell, Buy>) {
     auction::assert_settlement_phase(state);
+    assert_settlement_deadline_open(state, clock);
     let id = intent.intent_id();
     assert!(auction::is_winner_intent(state, &id), ENotInWinningSet);
     assert!(!auction::is_intent_settled(state, &id), EAlreadySettled);
@@ -227,6 +235,14 @@ fun normalize_surplus<Buy, NumBase, NumQuote>(
     }
 }
 
+fun assert_settlement_deadline_open(state: &AuctionState, clock: &Clock) {
+    assert!(clock.timestamp_ms() <= auction::settlement_deadline_ms(state), ESettlementDeadlinePassed);
+}
+
+fun assert_treasury_numeraire<N>(config: &GlobalConfig) {
+    assert!(type_name::with_defining_ids<N>() == config.numeraire_type(), ETreasuryNumeraireMismatch);
+}
+
 fun finalize_settlement<Sell, Buy, Stake>(
     state: &mut AuctionState,
     registry: &mut SolverRegistry<Stake>,
@@ -303,6 +319,7 @@ public fun close_batch<N, Stake>(
     ctx: &mut TxContext,
 ) {
     auction::assert_settlement_phase(state);
+    assert_treasury_numeraire<N>(config);
     assert!(auction::all_winners_settled(state), ENotAllSettled);
 
     let settled = auction::settled_intent_count(state);
@@ -430,6 +447,8 @@ public fun trigger_fallback<N, Stake>(
     auction::assert_settlement_phase(state);
     let now = clock.timestamp_ms();
     assert!(now > auction::settlement_deadline_ms(state), ETooEarly);
+    assert!(!auction::all_winners_settled(state), EAllWinnersSettled);
+    assert_treasury_numeraire<N>(config);
 
     let ids = auction::winner_intent_ids(state);
     let mut slashed = sui::balance::zero<Stake>();
