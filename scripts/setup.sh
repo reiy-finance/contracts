@@ -27,6 +27,37 @@ set_env_var() {
   fi
 }
 
+run_ptb() {
+  local attempt=1
+  local output
+  local rc
+  local attempts=${SUI_PTB_RETRY_ATTEMPTS:-6}
+  local delay=${SUI_PTB_RETRY_DELAY:-3}
+  local settle_delay=${SUI_PTB_SETTLE_DELAY:-1}
+
+  while true; do
+    output=$(sui client ptb "$@" 2>&1)
+    rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+      if [[ "$settle_delay" != "0" ]]; then
+        sleep "$settle_delay"
+      fi
+      printf "%s\n" "$output"
+      return 0
+    fi
+
+    if [[ "$output" == *"already locked by a different transaction"* && "$attempt" -lt "$attempts" ]]; then
+      echo "Gas object locked; retrying in ${delay}s (${attempt}/${attempts})..." >&2
+      sleep "$delay"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    printf "%s\n" "$output"
+    return "$rc"
+  done
+}
+
 echo "=== REIY Setup ==="
 echo "Package : $REIY_PACKAGE_ID"
 echo "Config  : $GLOBAL_CONFIG_ID"
@@ -38,19 +69,20 @@ echo "Stake   : $STAKE_TYPE"
 echo ""
 
 echo "Step 1: set_numeraire<${USDC_TYPE}> ..."
-sui client ptb \
+run_ptb \
   --move-call "${REIY_PACKAGE_ID}::config::set_numeraire<${USDC_TYPE}>" \
     "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
   --gas-budget "${GAS_BUDGET}"
 
 echo ""
 REGISTRY_ID=${SOLVER_REGISTRY_ID:-}
+REGISTRY_CREATED=0
 if [[ -n "$REGISTRY_ID" ]]; then
   echo "Step 2: use SolverRegistry ${REGISTRY_ID}"
 else
   echo "Step 2: init_registry<${STAKE_TYPE}> ..."
   REGISTRY_OUTPUT=$(
-    sui client ptb \
+    run_ptb \
       --move-call "${REIY_PACKAGE_ID}::solver_registry::init_registry<${STAKE_TYPE}>" \
         "@${ADMIN_CAP_ID}" \
       --gas-budget "${GAS_BUDGET}" \
@@ -74,21 +106,27 @@ else
   fi
   echo "SolverRegistry: $REGISTRY_ID"
   set_env_var SOLVER_REGISTRY_ID "$REGISTRY_ID"
+  REGISTRY_CREATED=1
 fi
 
-sui client ptb \
-  --move-call "${REIY_PACKAGE_ID}::config::set_solver_registry_id" \
-    "@${GLOBAL_CONFIG_ID}" "@${REGISTRY_ID}" "@${ADMIN_CAP_ID}" \
-  --gas-budget "${GAS_BUDGET}"
+if [[ "$REGISTRY_CREATED" -eq 1 || "${REBIND_CANONICAL_IDS:-0}" == "1" ]]; then
+  run_ptb \
+    --move-call "${REIY_PACKAGE_ID}::config::set_solver_registry_id" \
+      "@${GLOBAL_CONFIG_ID}" "@${REGISTRY_ID}" "@${ADMIN_CAP_ID}" \
+    --gas-budget "${GAS_BUDGET}"
+else
+  echo "Step 2b: registry binding already recorded"
+fi
 
 echo ""
 TREASURY_ID=${PROTOCOL_TREASURY_ID:-}
+TREASURY_CREATED=0
 if [[ -n "$TREASURY_ID" ]]; then
   echo "Step 3: use ProtocolTreasury ${TREASURY_ID}"
 else
   echo "Step 3: init_treasury<${USDC_TYPE},${STAKE_TYPE}> ..."
   TREASURY_OUTPUT=$(
-    sui client ptb \
+    run_ptb \
       --move-call "${REIY_PACKAGE_ID}::treasury::init_treasury<${USDC_TYPE},${STAKE_TYPE}>" \
         "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
       --gas-budget "${GAS_BUDGET}" \
@@ -112,12 +150,17 @@ else
   fi
   echo "ProtocolTreasury: $TREASURY_ID"
   set_env_var PROTOCOL_TREASURY_ID "$TREASURY_ID"
+  TREASURY_CREATED=1
 fi
 
-sui client ptb \
-  --move-call "${REIY_PACKAGE_ID}::config::set_protocol_treasury_id" \
-    "@${GLOBAL_CONFIG_ID}" "@${TREASURY_ID}" "@${ADMIN_CAP_ID}" \
-  --gas-budget "${GAS_BUDGET}"
+if [[ "$TREASURY_CREATED" -eq 1 || "${REBIND_CANONICAL_IDS:-0}" == "1" ]]; then
+  run_ptb \
+    --move-call "${REIY_PACKAGE_ID}::config::set_protocol_treasury_id" \
+      "@${GLOBAL_CONFIG_ID}" "@${TREASURY_ID}" "@${ADMIN_CAP_ID}" \
+    --gas-budget "${GAS_BUDGET}"
+else
+  echo "Step 3b: treasury binding already recorded"
+fi
 
 add_numeraire_pool_if_set() {
   local token_label=$1
@@ -130,7 +173,7 @@ add_numeraire_pool_if_set() {
   fi
 
   echo "  Adding numeraire pool for ${token_label}: ${pool_id}"
-  sui client ptb \
+  run_ptb \
     --move-call "${REIY_PACKAGE_ID}::config::add_numeraire_pool<${token_type}>" \
       "@${GLOBAL_CONFIG_ID}" "@${pool_id}" "@${ADMIN_CAP_ID}" \
     --gas-budget "${GAS_BUDGET}"
@@ -184,7 +227,7 @@ else
     fi
 
     echo "  Adding pair: ${SELL} -> ${BUY}"
-    sui client ptb \
+    run_ptb \
       --move-call "${REIY_PACKAGE_ID}::config::add_supported_pair<${SELL},${BUY}>" \
         "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
       --gas-budget "${GAS_BUDGET}"
@@ -195,7 +238,7 @@ fi
 if [[ -n "${MULTISIG_ADDRESS:-}" ]]; then
   echo ""
   echo "Step 6: Transferring AdminCap to multisig ${MULTISIG_ADDRESS} ..."
-  sui client ptb \
+  run_ptb \
     --transfer-objects "[@${ADMIN_CAP_ID}]" "@${MULTISIG_ADDRESS}" \
     --gas-budget "${GAS_BUDGET}"
   echo "✓ AdminCap transferred — you can no longer call setup again without multisig co-sign"
