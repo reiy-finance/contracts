@@ -131,11 +131,21 @@ public struct SolverDeregisteredEvent has copy, drop {
 public struct SolverSlashedEvent has copy, drop {
     solver: address,
     amount_slashed: u64,
-    reason: u8, // 0=timeout, 1=invalid proof, 2=repeated
+    reason: u8,
 }
 
 public struct StakeSlashDepositedEvent has copy, drop {
     epoch: u64,
+    amount: u64,
+}
+
+public struct ProtocolFeeWithdrawnEvent has copy, drop {
+    admin: address,
+    amount: u64,
+}
+
+public struct SlashedStakeWithdrawnEvent has copy, drop {
+    admin: address,
     amount: u64,
 }
 
@@ -334,6 +344,14 @@ public(package) fun emit_protocol_fee_collected(epoch: u64, amount: u64) {
 
 public(package) fun emit_stake_slash_deposited(epoch: u64, amount: u64) {
     event::emit(StakeSlashDepositedEvent { epoch, amount });
+}
+
+public(package) fun emit_protocol_fee_withdrawn(admin: address, amount: u64) {
+    event::emit(ProtocolFeeWithdrawnEvent { admin, amount });
+}
+
+public(package) fun emit_slashed_stake_withdrawn(admin: address, amount: u64) {
+    event::emit(SlashedStakeWithdrawnEvent { admin, amount });
 }
 
 public(package) fun emit_solver_registered(solver: address, stake_amount: u64) {

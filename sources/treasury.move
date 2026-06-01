@@ -1,6 +1,6 @@
 // Copyright (c) Reiy Finance
 
-/// Protocol treasury for numeraire fees/rewards and generic slashed stake.
+/// Protocol fee and slash treasury.
 module reiy::treasury;
 
 use reiy::config::{Self, GlobalConfig, AdminCap};
@@ -13,7 +13,7 @@ const EInsufficient: vector<u8> = b"treasury balance insufficient";
 #[error]
 const ENumeraireMismatch: vector<u8> = b"N does not match configured numeraire";
 
-/// Shared protocol treasury denominated in numeraire token `N` and stake token `Stake`.
+/// Treasury for numeraire revenue and slashed stake.
 public struct ProtocolTreasury<phantom N, phantom Stake> has key {
     id: UID,
     balance: Balance<N>,
@@ -23,20 +23,22 @@ public struct ProtocolTreasury<phantom N, phantom Stake> has key {
     total_fallback_bounty_paid: u64,
 }
 
-/// Create the shared treasury for numeraire `N` and stake asset `Stake`.
-public fun init_treasury<N, Stake>(config: &GlobalConfig, _cap: &AdminCap, ctx: &mut TxContext) {
+public fun init_treasury<N, Stake>(config: &GlobalConfig, _cap: &AdminCap, ctx: &mut TxContext): ID {
     assert!(
         std::type_name::with_defining_ids<N>() == config::numeraire_type(config),
         ENumeraireMismatch,
     );
-    transfer::share_object(ProtocolTreasury<N, Stake> {
+    let treasury = ProtocolTreasury<N, Stake> {
         id: object::new(ctx),
         balance: balance::zero<N>(),
         stake_balance: balance::zero<Stake>(),
         total_collected: 0,
         total_stake_slashed: 0,
         total_fallback_bounty_paid: 0,
-    });
+    };
+    let id = object::id(&treasury);
+    transfer::share_object(treasury);
+    id
 }
 
 public(package) fun deposit_fee<N, Stake>(
@@ -53,11 +55,12 @@ public(package) fun deposit_fee<N, Stake>(
 public(package) fun deposit_slashed_stake<N, Stake>(
     treasury: &mut ProtocolTreasury<N, Stake>,
     stake: Coin<Stake>,
+    gross_amount: u64,
     epoch: u64,
 ) {
     let amount = stake.value();
     treasury.stake_balance.join(stake.into_balance());
-    treasury.total_stake_slashed = treasury.total_stake_slashed + amount;
+    treasury.total_stake_slashed = treasury.total_stake_slashed + gross_amount;
     events::emit_stake_slash_deposited(epoch, amount);
 }
 
@@ -65,7 +68,6 @@ public(package) fun record_fallback_bounty<N, Stake>(
     treasury: &mut ProtocolTreasury<N, Stake>,
     amount: u64,
 ) {
-    treasury.total_stake_slashed = treasury.total_stake_slashed + amount;
     treasury.total_fallback_bounty_paid = treasury.total_fallback_bounty_paid + amount;
 }
 
@@ -77,6 +79,30 @@ public(package) fun withdraw_reward<N, Stake>(
     assert!(amount <= treasury.balance.value(), EInsufficient);
     coin::take(&mut treasury.balance, amount, ctx)
 }
+
+public fun withdraw_protocol_fees<N, Stake>(
+    treasury: &mut ProtocolTreasury<N, Stake>,
+    amount: u64,
+    _cap: &AdminCap,
+    ctx: &mut TxContext,
+): Coin<N> {
+    assert!(amount <= treasury.balance.value(), EInsufficient);
+    events::emit_protocol_fee_withdrawn(ctx.sender(), amount);
+    coin::take(&mut treasury.balance, amount, ctx)
+}
+
+public fun withdraw_slashed_stake<N, Stake>(
+    treasury: &mut ProtocolTreasury<N, Stake>,
+    amount: u64,
+    _cap: &AdminCap,
+    ctx: &mut TxContext,
+): Coin<Stake> {
+    assert!(amount <= treasury.stake_balance.value(), EInsufficient);
+    events::emit_slashed_stake_withdrawn(ctx.sender(), amount);
+    coin::take(&mut treasury.stake_balance, amount, ctx)
+}
+
+public fun id<N, Stake>(t: &ProtocolTreasury<N, Stake>): ID { object::id(t) }
 
 public fun balance<N, Stake>(t: &ProtocolTreasury<N, Stake>): u64 { t.balance.value() }
 

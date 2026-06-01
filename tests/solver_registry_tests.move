@@ -105,6 +105,48 @@ fun test_top_up_and_slash_suspends() {
 }
 
 #[test]
+fun test_deregister_reregister_preserves_slash_history() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        reg::register_solver(&mut registry, &cfg, h::mint<SUI>(stake_amt(), ts::ctx(&mut sc)), b"u", ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+    };
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let k1 = reg::bid_reservation_key(0, 1);
+        let k2 = reg::bid_reservation_key(0, 2);
+        let k3 = reg::bid_reservation_key(0, 3);
+        reg::reserve_stake(&mut registry, &cfg, SOLVER, k1, 100);
+        reg::reserve_stake(&mut registry, &cfg, SOLVER, k2, 100);
+        reg::reserve_stake(&mut registry, &cfg, SOLVER, k3, 100);
+        sui::balance::destroy_for_testing(reg::slash_reserved_stake(&mut registry, k1, reg::reason_timeout(), ts::ctx(&mut sc)));
+        sui::balance::destroy_for_testing(reg::slash_reserved_stake(&mut registry, k2, reg::reason_timeout(), ts::ctx(&mut sc)));
+        sui::balance::destroy_for_testing(reg::slash_reserved_stake(&mut registry, k3, reg::reason_timeout(), ts::ctx(&mut sc)));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+    };
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let stake = reg::deregister_solver(&mut registry, ts::ctx(&mut sc));
+        reg::register_solver(&mut registry, &cfg, stake, b"u", ts::ctx(&mut sc));
+        assert!(reg::slash_count(&registry, SOLVER) == 3, 0);
+        assert!(!reg::is_active(&registry, &cfg, SOLVER), 1);
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+    };
+    ts::end(sc);
+}
+
+#[test]
 fun test_reserve_release_and_deregister() {
     let mut sc = ts::begin(ADMIN);
     h::setup_all(&mut sc, ADMIN);

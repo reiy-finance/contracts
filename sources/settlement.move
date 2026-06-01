@@ -1,6 +1,6 @@
 // Copyright (c) Reiy Finance
 
-/// Intent settlement, EPSR verification, dual close, net-safe rewards, and fallback slashing.
+/// Intent settlement, rewards, and fallback slashing.
 module reiy::settlement;
 
 use deepbook::pool::Pool;
@@ -54,14 +54,7 @@ const EAllWinnersSettled: vector<u8> = b"all winning intents already settled";
 #[error]
 const ETreasuryNumeraireMismatch: vector<u8> = b"treasury numeraire does not match config";
 
-/// Hot-potato receipt created by `take_intent_*` and consumed by `settle_*` in the same PTB.
-/// * `intent_id`   - ID of the intent being settled
-/// * `owner`       - Trader address that receives the buy-token payout
-/// * `solver`      - Solver address that took the intent
-/// * `pair`        - Directed pair of the intent
-/// * `m_eff`       - Effective minimum buy amount (ceil proportional for partial fills)
-/// * `floor`       - Benchmark floor `max(m_eff, bm_i)`; payout must meet or exceed this
-/// * `sell_amount` - Amount of sell tokens extracted from the intent (for event emission)
+/// Receipt created by `take_intent_*` and consumed by `settle_*` in the same PTB.
 public struct SettlementReceipt<phantom Sell, phantom Buy> {
     intent_id: ID,
     owner: address,
@@ -74,8 +67,7 @@ public struct SettlementReceipt<phantom Sell, phantom Buy> {
 
 // === Take ===
 
-/// Take a fully-filled winning intent. Consumes the intent, hands the solver the locked sell asset,
-/// and returns a hot-potato receipt that MUST be consumed by a `settle_*` call in the same PTB.
+/// Take a fully-filled winning intent.
 public fun take_intent_full<Sell, Buy>(
     state: &mut AuctionState,
     intent: Intent<Sell, Buy>,
@@ -160,6 +152,7 @@ public fun settle_intent_numeraire<Sell, Buy, Stake>(
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
 ) {
+    assert_solver_registry(config, registry);
     assert!(type_name::with_defining_ids<Buy>() == config.numeraire_type(), ENotNumeraire);
     let net = payout.value();
     let (raw_surplus, floor) = verify_payout(&receipt, net);
@@ -177,6 +170,7 @@ public fun settle_intent<Sell, Buy, NumBase, NumQuote, Stake>(
     num_pool: &Pool<NumBase, NumQuote>,
     clock: &Clock,
 ) {
+    assert_solver_registry(config, registry);
     let net = payout.value();
     let (raw_surplus, floor) = verify_payout(&receipt, net);
 
@@ -241,6 +235,18 @@ fun assert_settlement_deadline_open(state: &AuctionState, clock: &Clock) {
 
 fun assert_treasury_numeraire<N>(config: &GlobalConfig) {
     assert!(type_name::with_defining_ids<N>() == config.numeraire_type(), ETreasuryNumeraireMismatch);
+}
+
+fun assert_solver_registry<Stake>(config: &GlobalConfig, registry: &SolverRegistry<Stake>) {
+    config.assert_solver_registry_id(solver_registry::id(registry));
+}
+
+fun assert_treasury<N, Stake>(
+    config: &GlobalConfig,
+    treasury: &ProtocolTreasury<N, Stake>,
+) {
+    assert_treasury_numeraire<N>(config);
+    config.assert_protocol_treasury_id(treasury::id(treasury));
 }
 
 fun finalize_settlement<Sell, Buy, Stake>(
@@ -319,7 +325,8 @@ public fun close_batch<N, Stake>(
     ctx: &mut TxContext,
 ) {
     auction::assert_settlement_phase(state);
-    assert_treasury_numeraire<N>(config);
+    assert_solver_registry(config, registry);
+    assert_treasury(config, treasury);
     assert!(auction::all_winners_settled(state), ENotAllSettled);
 
     let settled = auction::settled_intent_count(state);
@@ -431,10 +438,7 @@ fun release_unslashed_winning_reservations<Stake>(
 
 // === Fallback ===
 
-/// Permissionless fallback after the settlement deadline. A solver is slashed only for intents that
-/// were still settleable (not expired) yet left unsettled — i.e. genuine solver fault. Intents that
-/// expired before settlement are neither slashed nor re-queued; the owner reclaims them via cancel.
-/// Still-valid unsettled intents are re-queued for the next epoch. The epoch moves to Failed.
+/// Fallback failed settlement, requeues valid unsettled intents, and slashes faulted reservations.
 #[allow(lint(self_transfer))]
 public fun trigger_fallback<N, Stake>(
     state: &mut AuctionState,
@@ -448,11 +452,13 @@ public fun trigger_fallback<N, Stake>(
     let now = clock.timestamp_ms();
     assert!(now > auction::settlement_deadline_ms(state), ETooEarly);
     assert!(!auction::all_winners_settled(state), EAllWinnersSettled);
-    assert_treasury_numeraire<N>(config);
+    assert_solver_registry(config, registry);
+    assert_treasury(config, treasury);
 
     let ids = auction::winner_intent_ids(state);
     let mut slashed = sui::balance::zero<Stake>();
     let mut slashed_reservations = sui::vec_set::empty<StakeReservationKey>();
+    let mut slashed_owners = sui::vec_set::empty<address>();
 
     let mut i = 0;
     let n = ids.length();
@@ -460,14 +466,15 @@ public fun trigger_fallback<N, Stake>(
         let id = ids[i];
         if (!auction::is_intent_settled(state, &id) && auction::has_intent_meta(state, &id)) {
             let (pair, min_out, sell_amount, partial, deadline) = auction::intent_meta_of(state, &id);
-            // Expired intents were impossible to settle: do not slash, do not re-queue.
             if (now <= deadline) {
                 let reservation_key = auction::reservation_of_intent(state, &id);
                 if (
                     !slashed_reservations.contains(&reservation_key)
                     && solver_registry::has_reservation(registry, reservation_key)
                 ) {
+                    let owner = solver_registry::reservation_owner(registry, reservation_key);
                     slashed_reservations.insert(reservation_key);
+                    if (!slashed_owners.contains(&owner)) slashed_owners.insert(owner);
                     let b = solver_registry::slash_reserved_stake(
                         registry,
                         reservation_key,
@@ -488,7 +495,11 @@ public fun trigger_fallback<N, Stake>(
 
     if (slashed.value() > 0) {
         let total = slashed.value();
-        let bounty = math::mul_div_floor(total, config.fallback_bounty_bps(), math::bps_denom());
+        let bounty = if (slashed_owners.contains(&ctx.sender())) {
+            0
+        } else {
+            math::mul_div_floor(total, config.fallback_bounty_bps(), math::bps_denom())
+        };
         let mut stake = coin::from_balance(slashed, ctx);
         if (bounty > 0) {
             let bounty_coin = stake.split(bounty, ctx);
@@ -496,7 +507,7 @@ public fun trigger_fallback<N, Stake>(
             transfer::public_transfer(bounty_coin, ctx.sender());
         };
         if (stake.value() > 0) {
-            treasury::deposit_slashed_stake(treasury, stake, auction::current_epoch(state));
+            treasury::deposit_slashed_stake(treasury, stake, total, auction::current_epoch(state));
         } else {
             stake.destroy_zero();
         };

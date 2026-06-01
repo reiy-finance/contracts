@@ -69,15 +69,20 @@ public struct SolverRegistry<phantom Stake> has key {
     solvers: Table<address, SolverInfo>,
     stakes: Table<address, Balance<Stake>>,
     reservations: Table<StakeReservationKey, StakeReservation>,
+    slash_history: Table<address, u64>,
 }
 
-public fun init_registry<Stake>(_cap: &AdminCap, ctx: &mut TxContext) {
-    transfer::share_object(SolverRegistry<Stake> {
+public fun init_registry<Stake>(_cap: &AdminCap, ctx: &mut TxContext): ID {
+    let registry = SolverRegistry<Stake> {
         id: object::new(ctx),
         solvers: table::new(ctx),
         stakes: table::new(ctx),
         reservations: table::new(ctx),
-    });
+        slash_history: table::new(ctx),
+    };
+    let id = object::id(&registry);
+    transfer::share_object(registry);
+    id
 }
 
 public fun register_solver<Stake>(
@@ -91,6 +96,16 @@ public fun register_solver<Stake>(
     assert!(!registry.solvers.contains(solver), ESolverAlreadyRegistered);
     assert!(stake.value() >= config.min_solver_stake(), EStakeTooSmall);
     let amount = stake.value();
+    let slash_count = if (registry.slash_history.contains(solver)) {
+        *registry.slash_history.borrow(solver)
+    } else {
+        0
+    };
+    let status = if (slash_count >= SUSPEND_THRESHOLD) {
+        SolverStatus::Suspended
+    } else {
+        SolverStatus::Active
+    };
     registry
         .solvers
         .add(
@@ -98,8 +113,8 @@ public fun register_solver<Stake>(
             SolverInfo {
                 url,
                 total_settled: 0,
-                slash_count: 0,
-                status: SolverStatus::Active,
+                slash_count,
+                status,
                 reserved_stake: 0,
             },
         );
@@ -192,6 +207,11 @@ public(package) fun slash_reserved_stake<Stake>(
     assert!(amount <= info.reserved_stake, EInsufficientStake);
     info.reserved_stake = info.reserved_stake - amount;
     info.slash_count = info.slash_count + 1;
+    if (registry.slash_history.contains(owner)) {
+        *registry.slash_history.borrow_mut(owner) = info.slash_count;
+    } else {
+        registry.slash_history.add(owner, info.slash_count);
+    };
     if (info.slash_count >= SUSPEND_THRESHOLD) { info.status = SolverStatus::Suspended; };
 
     let stake = registry.stakes.borrow_mut(owner);
@@ -215,6 +235,8 @@ public(package) fun record_settled<Stake>(
 public fun is_registered<Stake>(registry: &SolverRegistry<Stake>, solver: address): bool {
     registry.solvers.contains(solver)
 }
+
+public fun id<Stake>(registry: &SolverRegistry<Stake>): ID { object::id(registry) }
 
 public fun is_active<Stake>(
     registry: &SolverRegistry<Stake>,
@@ -251,6 +273,14 @@ public fun reservation_amount<Stake>(
 ): u64 {
     if (!registry.reservations.contains(key)) return 0;
     registry.reservations.borrow(key).amount
+}
+
+public fun reservation_owner<Stake>(
+    registry: &SolverRegistry<Stake>,
+    key: StakeReservationKey,
+): address {
+    assert!(registry.reservations.contains(key), EReservationMissing);
+    registry.reservations.borrow(key).owner
 }
 
 public fun has_reservation<Stake>(
@@ -299,6 +329,6 @@ public fun assert_registered<Stake>(registry: &SolverRegistry<Stake>, solver: ad
 }
 
 #[test_only]
-public fun init_for_testing<Stake>(cap: &AdminCap, ctx: &mut TxContext) {
-    init_registry<Stake>(cap, ctx);
+public fun init_for_testing<Stake>(cap: &AdminCap, ctx: &mut TxContext): ID {
+    init_registry<Stake>(cap, ctx)
 }

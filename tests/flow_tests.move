@@ -381,8 +381,7 @@ fun test_expired_winning_intent_take_aborts() {
     ts::end(sc);
 }
 
-/// Fix regression: after the settlement deadline, `trigger_fallback` must NOT slash a solver for an
-/// intent that expired before settlement (out of the solver's control). Stake stays intact.
+/// Expired intents are not slashable during fallback.
 #[test]
 fun test_expired_intent_not_slashed_in_fallback() {
     let mut sc = ts::begin(ADMIN);
@@ -402,7 +401,6 @@ fun test_expired_intent_not_slashed_in_fallback() {
         settlement::trigger_fallback(
             &mut state, &mut registry, &cfg, &mut treasury, &clock, ts::ctx(&mut sc),
         );
-        // expired intent => no slash; stake untouched, no slash recorded
         assert!(reg::stake_of(&registry, SOLVER) == STAKE_AMOUNT, 1);
         assert!(reg::reserved_stake_of(&registry, SOLVER) == 0, 4);
         assert!(reg::slash_count(&registry, SOLVER) == 0, 2);
@@ -416,8 +414,7 @@ fun test_expired_intent_not_slashed_in_fallback() {
     ts::end(sc);
 }
 
-/// Fix regression: a partial fill that consumes the ENTIRE remaining balance is rejected. The final
-/// fill must go through the full-consume path (which deletes the object), so no zombie can form.
+/// Full drains must use the full-consume settlement path.
 #[test]
 #[expected_failure(abort_code = reiy::intent_book::EFillNotStrictlyPartial)]
 fun test_full_drain_via_partial_rejected() {
@@ -445,8 +442,7 @@ fun test_full_drain_via_partial_rejected() {
     ts::end(sc);
 }
 
-/// A strict partial fill (less than remaining) still works and leaves the intent alive with the
-/// residual balance for the next epoch.
+/// Strict partial fills keep the residual intent alive.
 #[test]
 fun test_strict_partial_fill_keeps_residual() {
     let mut sc = ts::begin(ADMIN);
@@ -482,12 +478,18 @@ fun test_strict_partial_fill_keeps_residual() {
     ts::end(sc);
 }
 
-/// Fix regression: `close_batch` deposits only the required fee and refunds any overpayment to the
-/// caller; the treasury collects exactly the required amount, not the full coin.
 #[test]
 fun test_overpaid_fee_refunded() {
     let mut sc = ts::begin(ADMIN);
     h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        config::set_protocol_fee(&mut cfg, 200, &cap);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
     ts::next_tx(&mut sc, ADMIN);
     let mut clock = h::new_clock(ts::ctx(&mut sc));
     let (id1, id2) = drive_to_settlement(&mut sc, &mut clock);
@@ -495,7 +497,6 @@ fun test_overpaid_fee_refunded() {
     settle_one(&mut sc, id1, 4_180, &clock);
     settle_one(&mut sc, id2, 2_090, &clock);
 
-    // value_sum = 2090 + 1045 = 3135; required fee = 3135 * 5 / 10000 = 1
     ts::next_tx(&mut sc, SOLVER);
     {
         let mut state = ts::take_shared<AuctionState>(&mut sc);
@@ -506,12 +507,22 @@ fun test_overpaid_fee_refunded() {
             &mut state, &cfg, &mut registry, &mut treasury,
             h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc),
         );
-        // only the required 1 collected; the remaining 99 was split off and refunded to the caller
-        assert!(reiy::treasury::total_collected(&treasury) == 1, 1);
+        assert!(reiy::treasury::total_collected(&treasury) == 62, 1);
+        assert!(reiy::treasury::balance(&treasury) == 31, 3);
         ts::return_shared(treasury);
         ts::return_shared(registry);
         ts::return_shared(cfg);
         ts::return_shared(state);
+    };
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        let fees = reiy::treasury::withdraw_protocol_fees(&mut treasury, 31, &cap, ts::ctx(&mut sc));
+        assert!(reiy::treasury::balance(&treasury) == 0, 2);
+        h::burn(fees);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(treasury);
     };
     clock.destroy_for_testing();
     ts::end(sc);
@@ -900,6 +911,18 @@ fun test_fallback_slash_on_deadline_miss() {
         ts::return_shared(registry);
         ts::return_shared(state);
     };
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        let stake =
+            reiy::treasury::withdraw_slashed_stake(&mut treasury, 1_000_000_000, &cap, ts::ctx(&mut sc));
+        assert!(reiy::treasury::stake_balance(&treasury) == 0, 5);
+        assert!(reiy::treasury::total_stake_slashed(&treasury) == 1_000_000_000, 6);
+        h::burn(stake);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(treasury);
+    };
     clock.destroy_for_testing();
     ts::end(sc);
 }
@@ -945,6 +968,44 @@ fun test_fallback_bounty_splits_slashed_stake() {
         let bounty = ts::take_from_sender<sui::coin::Coin<SUI>>(&mut sc);
         assert!(bounty.value() == 100_000_000, 4);
         h::burn(bounty);
+    };
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+#[test]
+fun test_at_fault_solver_gets_no_fallback_bounty() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        config::set_fallback_bounty_bps(&mut cfg, 1_000, &cap);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    let (_id1, _id2) = drive_to_settlement(&mut sc, &mut clock);
+
+    clock.set_for_testing(50_000);
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
+        settlement::trigger_fallback(
+            &mut state, &mut registry, &cfg, &mut treasury, &clock, ts::ctx(&mut sc),
+        );
+        assert!(reiy::treasury::stake_balance(&treasury) == 1_000_000_000, 0);
+        assert!(reiy::treasury::total_stake_slashed(&treasury) == 1_000_000_000, 1);
+        assert!(reiy::treasury::total_fallback_bounty_paid(&treasury) == 0, 2);
+        ts::return_shared(treasury);
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
     };
     clock.destroy_for_testing();
     ts::end(sc);
@@ -1049,7 +1110,7 @@ fun test_close_wrong_treasury_numeraire_aborts() {
         let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
         let cap = ts::take_from_sender<AdminCap>(&mut sc);
         config::set_numeraire<TOKA>(&mut cfg, &cap);
-        reiy::treasury::init_treasury<TOKA, SUI>(&cfg, &cap, ts::ctx(&mut sc));
+        let _ = reiy::treasury::init_treasury<TOKA, SUI>(&cfg, &cap, ts::ctx(&mut sc));
         config::set_numeraire<USDC>(&mut cfg, &cap);
         ts::return_to_sender(&mut sc, cap);
         ts::return_shared(cfg);
@@ -1073,6 +1134,54 @@ fun test_close_wrong_treasury_numeraire_aborts() {
     ts::return_shared(treasury);
     ts::return_shared(registry);
     ts::return_shared(cfg);
+    ts::return_shared(state);
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+#[test]
+#[expected_failure(abort_code = reiy::config::EWrongCanonicalObject)]
+fun test_submit_bid_wrong_registry_aborts() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    clock.set_for_testing(1_000);
+
+    ts::next_tx(&mut sc, U1);
+    let id;
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        id = auction::submit_intent_with_price_for_testing<TOKA, USDC>(
+            &mut state, &cfg, h::mint<TOKA>(1_000, ts::ctx(&mut sc)),
+            1_900, MID, 500, true, false, DEADLINE, &clock, ts::ctx(&mut sc),
+        );
+        ts::return_shared(cfg);
+        ts::return_shared(state);
+    };
+    register_solver(&mut sc, SOLVER);
+    ts::next_tx(&mut sc, ADMIN);
+    advance(&mut sc, &clock);
+
+    ts::next_tx(&mut sc, ADMIN);
+    let foreign_id;
+    {
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        foreign_id = reg::init_for_testing<SUI>(&cap, ts::ctx(&mut sc));
+        ts::return_to_sender(&mut sc, cap);
+    };
+
+    ts::next_tx(&mut sc, SOLVER);
+    let mut state = ts::take_shared<AuctionState>(&mut sc);
+    let mut registry = ts::take_shared_by_id<SolverRegistry<SUI>>(&mut sc, foreign_id);
+    let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+    auction::submit_bid(
+        &mut state, &mut registry, &cfg,
+        vector[id], vector[1_000], vector[2_090], false, 190, ts::ctx(&mut sc),
+    );
+    ts::return_shared(cfg);
+    ts::return_shared(registry);
     ts::return_shared(state);
     clock.destroy_for_testing();
     ts::end(sc);

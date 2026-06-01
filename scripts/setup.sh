@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Post-deploy setup: init_registry, init_treasury, add_supported_pairs, add_numeraire_pool.
-# All calls go through `sui client ptb` (no move test_only paths).
+# Post-deploy protocol setup.
 # Usage: setup.sh <env_file>
 set -euo pipefail
 
 ENV_FILE=${1:-.env.testnet}
 source "$ENV_FILE"
 
-# --- guard: make sure required vars are set ---
 required_vars=(
   REIY_PACKAGE_ID GLOBAL_CONFIG_ID ADMIN_CAP_ID
   USDC_TYPE SUI_TYPE GAS_BUDGET
@@ -29,14 +27,12 @@ STAKE_TYPE=${STAKE_TYPE:-$SUI_TYPE}
 echo "Stake   : $STAKE_TYPE"
 echo ""
 
-# ---- 1. set_numeraire<USDC> ----
 echo "Step 1: set_numeraire<${USDC_TYPE}> ..."
 sui client ptb \
   --move-call "${REIY_PACKAGE_ID}::config::set_numeraire<${USDC_TYPE}>" \
     "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
   --gas-budget "${GAS_BUDGET}"
 
-# ---- 2. init_registry<STAKE> ----
 echo ""
 echo "Step 2: init_registry<${STAKE_TYPE}> ..."
 REGISTRY_OUTPUT=$(
@@ -64,13 +60,17 @@ if [[ -z "$REGISTRY_ID" ]]; then
 fi
 echo "SolverRegistry: $REGISTRY_ID"
 
+sui client ptb \
+  --move-call "${REIY_PACKAGE_ID}::config::set_solver_registry_id" \
+    "@${GLOBAL_CONFIG_ID}" "@${REGISTRY_ID}" "@${ADMIN_CAP_ID}" \
+  --gas-budget "${GAS_BUDGET}"
+
 if grep -q "^SOLVER_REGISTRY_ID=" "$ENV_FILE"; then
   sed -i.bak "s|^SOLVER_REGISTRY_ID=.*|SOLVER_REGISTRY_ID=${REGISTRY_ID}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
 else
   echo "SOLVER_REGISTRY_ID=${REGISTRY_ID}" >> "$ENV_FILE"
 fi
 
-# ---- 3. init_treasury<USDC, STAKE> ----
 echo ""
 echo "Step 3: init_treasury<${USDC_TYPE},${STAKE_TYPE}> ..."
 TREASURY_OUTPUT=$(
@@ -98,15 +98,17 @@ if [[ -z "$TREASURY_ID" ]]; then
 fi
 echo "ProtocolTreasury: $TREASURY_ID"
 
-# save to env file
+sui client ptb \
+  --move-call "${REIY_PACKAGE_ID}::config::set_protocol_treasury_id" \
+    "@${GLOBAL_CONFIG_ID}" "@${TREASURY_ID}" "@${ADMIN_CAP_ID}" \
+  --gas-budget "${GAS_BUDGET}"
+
 if grep -q "^PROTOCOL_TREASURY_ID=" "$ENV_FILE"; then
   sed -i.bak "s|^PROTOCOL_TREASURY_ID=.*|PROTOCOL_TREASURY_ID=${TREASURY_ID}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
 else
   echo "PROTOCOL_TREASURY_ID=${TREASURY_ID}" >> "$ENV_FILE"
 fi
 
-# ---- 4. add_numeraire_pool per token that needs normalization ----
-# Pattern: add_numeraire_pool<Token>(config, pool_id, cap)
 add_numeraire_pool_if_set() {
   local token_label=$1
   local token_type=$2

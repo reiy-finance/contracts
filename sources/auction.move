@@ -55,6 +55,8 @@ const EBidEpsrInconsistent: vector<u8> = b"bid payouts violate uniform ratio wit
 const ESolverNotActive: vector<u8> = b"solver not registered/active";
 #[error]
 const EUseFallbackAfterDeadline: vector<u8> = b"settlement deadline passed; use fallback";
+#[error]
+const EBatchLimitExceeded: vector<u8> = b"batch size limit exceeded";
 
 // === Phase ===
 public enum AuctionPhase has copy, drop, store {
@@ -401,6 +403,7 @@ public fun advance_phase<Stake>(
     config: &GlobalConfig,
     clock: &Clock,
 ) {
+    config.assert_solver_registry_id(solver_registry::id(registry));
     let now = clock.timestamp_ms();
     let t = phase_tag(&state.phase);
     if (t == 0) {
@@ -490,11 +493,13 @@ public fun submit_bid<Stake>(
     ctx: &TxContext,
 ) {
     assert!(phase_tag(&state.phase) == 1, EWrongPhase);
+    config.assert_solver_registry_id(solver_registry::id(registry));
     let solver = ctx.sender();
     assert!(solver_registry::is_active(registry, config, solver), ESolverNotActive);
 
     let n = intent_ids.length();
     assert!(n > 0, EEmptyIntents);
+    assert!(n <= config.max_allocation_intents(), EBatchLimitExceeded);
     assert!(fills.length() == n && payouts.length() == n, ELengthMismatch);
 
     let mut m_effs = vector[];
@@ -604,8 +609,10 @@ public fun submit_pair_benchmark<Stake>(
     ctx: &TxContext,
 ) {
     assert!(phase_tag(&state.phase) == 2, EWrongPhase);
+    config.assert_solver_registry_id(solver_registry::id(registry));
     let m = bid_seqs.length();
     assert!(m > 0, EEmptyIntents);
+    assert!(m <= config.max_allocation_bids(), EBatchLimitExceeded);
     let auctioneer = ctx.sender();
     assert!(solver_registry::is_active(registry, config, auctioneer), ESolverNotActive);
 
@@ -637,6 +644,7 @@ public fun submit_pair_benchmark<Stake>(
             payouts.push_back(bid.payouts[j]);
             j = j + 1;
         };
+        assert!(intents.length() <= config.max_allocation_intents(), EBatchLimitExceeded);
         i = i + 1;
     };
 
@@ -671,6 +679,7 @@ public fun submit_pair_benchmark<Stake>(
             accepted = true;
         };
     } else {
+        assert!(state.pair_benchmarks.length() < config.max_allocation_pairs(), EBatchLimitExceeded);
         let seq = state.next_benchmark_seq;
         state.next_benchmark_seq = seq + 1;
         solver_registry::reserve_stake(
@@ -712,11 +721,13 @@ public fun submit_allocation<Stake>(
     ctx: &TxContext,
 ) {
     assert!(phase_tag(&state.phase) == 2, EWrongPhase);
+    config.assert_solver_registry_id(solver_registry::id(registry));
     assert!(bid_seqs.length() > 0, EEmptyIntents);
+    assert!(bid_seqs.length() <= config.max_allocation_bids(), EBatchLimitExceeded);
     let auctioneer = ctx.sender();
     assert!(solver_registry::is_active(registry, config, auctioneer), ESolverNotActive);
 
-    validate_allocation(state, &bid_seqs, total_score);
+    validate_allocation(state, config, &bid_seqs, total_score);
 
     let idx = state.allocations.length();
     let bid_count = bid_seqs.length();
@@ -746,8 +757,14 @@ public fun submit_allocation<Stake>(
     );
 }
 
-fun validate_allocation(state: &AuctionState, bid_seqs: &vector<u64>, declared_score: u64) {
+fun validate_allocation(
+    state: &AuctionState,
+    config: &GlobalConfig,
+    bid_seqs: &vector<u64>,
+    declared_score: u64,
+) {
     let mut seen = vec_set::empty<ID>();
+    let mut seen_pairs = vec_set::empty<PairKey>();
     let mut score_sum = 0u64;
     let mut i = 0;
     let m = bid_seqs.length();
@@ -760,6 +777,7 @@ fun validate_allocation(state: &AuctionState, bid_seqs: &vector<u64>, declared_s
             let id = bid.intents[j];
             assert!(!seen.contains(&id), EOverlappingBids);
             seen.insert(id);
+            if (!seen_pairs.contains(&bid.pairs[j])) seen_pairs.insert(bid.pairs[j]);
             let bm = benchmark_payout(state, &bid.pairs[j], &id);
             let floor = max_u64(bid.m_effs[j], bm);
             assert!(bid.payouts[j] >= floor, EBelowFloor);
@@ -769,6 +787,8 @@ fun validate_allocation(state: &AuctionState, bid_seqs: &vector<u64>, declared_s
         };
         i = i + 1;
     };
+    assert!(seen.length() <= config.max_allocation_intents(), EBatchLimitExceeded);
+    assert!(seen_pairs.length() <= config.max_allocation_pairs(), EBatchLimitExceeded);
     assert!(score_sum == declared_score, EScoreSumMismatch);
 }
 

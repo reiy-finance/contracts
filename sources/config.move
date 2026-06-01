@@ -14,7 +14,7 @@ const ROLE_CONFIG_ADMIN: u64 = 0;
 const MAX_FEE_BPS: u64 = 1_000;
 const MAX_SLIPPAGE_BPS: u64 = 2_000;
 const MAX_BPS: u64 = 10_000;
-const MIN_GRIEF_FACTOR_BPS: u64 = 10_000; // stake >= 1.0x griefed score
+const MIN_GRIEF_FACTOR_BPS: u64 = 10_000;
 const MAX_FALLBACK_BOUNTY_BPS: u64 = 1_000;
 
 const DEFAULT_COLLECTION_MS: u64 = 10_000;
@@ -30,8 +30,9 @@ const DEFAULT_BENCHMARK_STAKE: u64 = 1_000_000_000;
 const DEFAULT_FALLBACK_BOUNTY_BPS: u64 = 0;
 const DEFAULT_REWARD_SHARE_BPS: u64 = 2_000;
 const DEFAULT_REWARD_CAP_BPS: u64 = 100;
-const DEFAULT_AUCTIONEER_SHARE_BPS: u64 = 500;
-const DEFAULT_AUCTIONEER_REWARD_CAP: u64 = 1_000_000_000;
+const DEFAULT_MAX_ALLOCATION_BIDS: u64 = 32;
+const DEFAULT_MAX_ALLOCATION_INTENTS: u64 = 128;
+const DEFAULT_MAX_ALLOCATION_PAIRS: u64 = 16;
 const DEFAULT_MAX_SLIPPAGE_BPS: u64 = 500;
 const DEFAULT_MIN_SBBO_MID_PRICE: u64 = 1;
 const DEFAULT_PRICE_ORACLE_MAX_AGE_MS: u64 = 60_000;
@@ -44,6 +45,12 @@ const EInvalidParam: vector<u8> = b"parameter out of allowed bounds";
 const ENumeraireNotSet: vector<u8> = b"numeraire type not configured";
 #[error]
 const EPairNotSupported: vector<u8> = b"directed pair not on allowlist";
+#[error]
+const ECanonicalObjectNotSet: vector<u8> = b"canonical object not configured";
+#[error]
+const ECanonicalObjectAlreadySet: vector<u8> = b"canonical object already configured";
+#[error]
+const EWrongCanonicalObject: vector<u8> = b"wrong canonical object";
 
 /// Owned capability gating all mutations.
 public struct AdminCap has key, store { id: UID }
@@ -52,31 +59,7 @@ public struct ACL has store {
     members: Table<address, vector<u64>>,
 }
 
-/// Shared protocol configuration object. All mutations require `AdminCap`.
-/// * `id`                          - UID of the shared object
-/// * `version`                     - Schema version; bumped on breaking field changes
-/// * `collection_duration_ms`      - Duration of the IntentCollection phase (ms)
-/// * `bid_duration_ms`             - Duration of the Bid phase (ms)
-/// * `selection_duration_ms`       - Duration of the AllocationSelection phase (ms)
-/// * `settlement_deadline_ms`      - Maximum time allowed for settlement after winner selection (ms)
-/// * `min_batch_collect_ms`        - Minimum cooldown between epochs (ms)
-/// * `protocol_fee_bps`            - Protocol fee charged on settled volume (bps)
-/// * `min_solver_stake`            - Minimum stake required to register and stay bid-eligible
-/// * `grief_factor_bps`            - Stake scaling factor; required stake = max(min, score * grief_factor)
-/// * `required_allocation_stake`   - Stake required to submit an Allocation
-/// * `required_benchmark_stake`    - Stake required to submit a PairBenchmark
-/// * `fallback_bounty_bps`         - Share of slashed stake paid to fallback caller (bps)
-/// * `reward_share_bps`            - Solver reward as a fraction of verified surplus (bps)
-/// * `reward_cap_bps`              - Hard cap on total solver reward as a fraction of settled value (bps)
-/// * `auctioneer_share_bps`        - Auctioneer reward share (bps)
-/// * `auctioneer_reward_cap`       - Hard cap on auctioneer reward (absolute, in numeraire)
-/// * `max_slippage_tolerance_bps`  - Maximum allowed slippage tolerance per intent submission (bps)
-/// * `min_sbbo_mid_price`          - Minimum acceptable DeepBook mid price; zero price is rejected
-/// * `price_oracle_max_age_ms`     - Maximum acceptable age of a price observation (ms)
-/// * `supported_pairs`             - Allowlist of directed pairs accepted for intent submission
-/// * `numeraire_pools`             - Map from buy-token type to its DeepBook numeraire pool ID
-/// * `numeraire_type`              - The protocol numeraire token type (e.g. USDC)
-/// * `acl`                         - Role-based access control table
+/// Shared protocol configuration and canonical object bindings.
 public struct GlobalConfig has key {
     id: UID,
     version: u64,
@@ -93,11 +76,14 @@ public struct GlobalConfig has key {
     fallback_bounty_bps: u64,
     reward_share_bps: u64,
     reward_cap_bps: u64,
-    auctioneer_share_bps: u64,
-    auctioneer_reward_cap: u64,
+    max_allocation_bids: u64,
+    max_allocation_intents: u64,
+    max_allocation_pairs: u64,
     max_slippage_tolerance_bps: u64,
     min_sbbo_mid_price: u64,
     price_oracle_max_age_ms: u64,
+    solver_registry_id: Option<ID>,
+    protocol_treasury_id: Option<ID>,
     supported_pairs: VecSet<PairKey>,
     numeraire_pools: VecMap<TypeName, ID>,
     numeraire_type: Option<TypeName>,
@@ -110,7 +96,7 @@ fun init(ctx: &mut TxContext) {
     acl.members.add(ctx.sender(), vector[ROLE_CONFIG_ADMIN]);
     transfer::share_object(GlobalConfig {
         id: object::new(ctx),
-        version: 3,
+        version: 4,
         collection_duration_ms: DEFAULT_COLLECTION_MS,
         bid_duration_ms: DEFAULT_BID_MS,
         selection_duration_ms: DEFAULT_SELECTION_MS,
@@ -124,11 +110,14 @@ fun init(ctx: &mut TxContext) {
         fallback_bounty_bps: DEFAULT_FALLBACK_BOUNTY_BPS,
         reward_share_bps: DEFAULT_REWARD_SHARE_BPS,
         reward_cap_bps: DEFAULT_REWARD_CAP_BPS,
-        auctioneer_share_bps: DEFAULT_AUCTIONEER_SHARE_BPS,
-        auctioneer_reward_cap: DEFAULT_AUCTIONEER_REWARD_CAP,
+        max_allocation_bids: DEFAULT_MAX_ALLOCATION_BIDS,
+        max_allocation_intents: DEFAULT_MAX_ALLOCATION_INTENTS,
+        max_allocation_pairs: DEFAULT_MAX_ALLOCATION_PAIRS,
         max_slippage_tolerance_bps: DEFAULT_MAX_SLIPPAGE_BPS,
         min_sbbo_mid_price: DEFAULT_MIN_SBBO_MID_PRICE,
         price_oracle_max_age_ms: DEFAULT_PRICE_ORACLE_MAX_AGE_MS,
+        solver_registry_id: option::none(),
+        protocol_treasury_id: option::none(),
         supported_pairs: vec_set::empty(),
         numeraire_pools: vec_map::empty(),
         numeraire_type: option::none(),
@@ -239,13 +228,19 @@ public fun set_reward_cap(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     set(&mut c.reward_cap_bps, v, b"reward_cap_bps");
 }
 
-public fun set_auctioneer_share(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    assert!(v <= MAX_BPS, EInvalidParam);
-    set(&mut c.auctioneer_share_bps, v, b"auctioneer_share_bps");
+public fun set_max_allocation_bids(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
+    assert!(v > 0, EInvalidParam);
+    set(&mut c.max_allocation_bids, v, b"max_allocation_bids");
 }
 
-public fun set_auctioneer_reward_cap(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    set(&mut c.auctioneer_reward_cap, v, b"auctioneer_reward_cap");
+public fun set_max_allocation_intents(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
+    assert!(v > 0, EInvalidParam);
+    set(&mut c.max_allocation_intents, v, b"max_allocation_intents");
+}
+
+public fun set_max_allocation_pairs(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
+    assert!(v > 0, EInvalidParam);
+    set(&mut c.max_allocation_pairs, v, b"max_allocation_pairs");
 }
 
 public fun set_max_slippage(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
@@ -310,6 +305,26 @@ public fun numeraire_type(c: &GlobalConfig): TypeName {
     *c.numeraire_type.borrow()
 }
 
+public fun set_solver_registry_id(c: &mut GlobalConfig, id: ID, _: &AdminCap) {
+    assert!(c.solver_registry_id.is_none(), ECanonicalObjectAlreadySet);
+    c.solver_registry_id = option::some(id);
+}
+
+public fun set_protocol_treasury_id(c: &mut GlobalConfig, id: ID, _: &AdminCap) {
+    assert!(c.protocol_treasury_id.is_none(), ECanonicalObjectAlreadySet);
+    c.protocol_treasury_id = option::some(id);
+}
+
+public fun assert_solver_registry_id(c: &GlobalConfig, id: ID) {
+    assert!(c.solver_registry_id.is_some(), ECanonicalObjectNotSet);
+    assert!(*c.solver_registry_id.borrow() == id, EWrongCanonicalObject);
+}
+
+public fun assert_protocol_treasury_id(c: &GlobalConfig, id: ID) {
+    assert!(c.protocol_treasury_id.is_some(), ECanonicalObjectNotSet);
+    assert!(*c.protocol_treasury_id.borrow() == id, EWrongCanonicalObject);
+}
+
 // === Getters ===
 
 public fun version(c: &GlobalConfig): u64 { c.version }
@@ -340,9 +355,21 @@ public fun reward_share_bps(c: &GlobalConfig): u64 { c.reward_share_bps }
 
 public fun reward_cap_bps(c: &GlobalConfig): u64 { c.reward_cap_bps }
 
-public fun auctioneer_share_bps(c: &GlobalConfig): u64 { c.auctioneer_share_bps }
+public fun max_allocation_bids(c: &GlobalConfig): u64 { c.max_allocation_bids }
 
-public fun auctioneer_reward_cap(c: &GlobalConfig): u64 { c.auctioneer_reward_cap }
+public fun max_allocation_intents(c: &GlobalConfig): u64 { c.max_allocation_intents }
+
+public fun max_allocation_pairs(c: &GlobalConfig): u64 { c.max_allocation_pairs }
+
+public fun solver_registry_id(c: &GlobalConfig): ID {
+    assert!(c.solver_registry_id.is_some(), ECanonicalObjectNotSet);
+    *c.solver_registry_id.borrow()
+}
+
+public fun protocol_treasury_id(c: &GlobalConfig): ID {
+    assert!(c.protocol_treasury_id.is_some(), ECanonicalObjectNotSet);
+    *c.protocol_treasury_id.borrow()
+}
 
 public fun max_slippage_tolerance_bps(c: &GlobalConfig): u64 { c.max_slippage_tolerance_bps }
 

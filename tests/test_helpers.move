@@ -28,8 +28,7 @@ public fun new_clock(ctx: &mut TxContext): Clock {
     clock::create_for_testing(ctx)
 }
 
-/// Initialize config + auction, set numeraire = USDC, allowlist pairs,
-/// and create the SUI-staked registry plus USDC/SUI treasury.
+/// Initialize canonical test protocol objects.
 public fun setup_all(scenario: &mut Scenario, admin: address) {
     ts::next_tx(scenario, admin);
     {
@@ -45,8 +44,10 @@ public fun setup_all(scenario: &mut Scenario, admin: address) {
         config::add_supported_pair<TOKA, USDC>(&mut cfg, &cap);
         config::add_supported_pair<TOKB, USDC>(&mut cfg, &cap);
         config::add_supported_pair<TOKA, TOKB>(&mut cfg, &cap);
-        solver_registry::init_for_testing<SUI>(&cap, ts::ctx(scenario));
-        treasury::init_treasury<USDC, SUI>(&cfg, &cap, ts::ctx(scenario));
+        let registry_id = solver_registry::init_for_testing<SUI>(&cap, ts::ctx(scenario));
+        let treasury_id = treasury::init_treasury<USDC, SUI>(&cfg, &cap, ts::ctx(scenario));
+        config::set_solver_registry_id(&mut cfg, registry_id, &cap);
+        config::set_protocol_treasury_id(&mut cfg, treasury_id, &cap);
         ts::return_to_sender(scenario, cap);
         ts::return_shared(cfg);
     };
