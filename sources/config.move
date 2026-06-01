@@ -306,13 +306,19 @@ public fun numeraire_type(c: &GlobalConfig): TypeName {
 }
 
 public fun set_solver_registry_id(c: &mut GlobalConfig, id: ID, _: &AdminCap) {
-    assert!(c.solver_registry_id.is_none(), ECanonicalObjectAlreadySet);
-    c.solver_registry_id = option::some(id);
+    if (c.solver_registry_id.is_some()) {
+        assert!(*c.solver_registry_id.borrow() == id, ECanonicalObjectAlreadySet);
+    } else {
+        c.solver_registry_id = option::some(id);
+    };
 }
 
 public fun set_protocol_treasury_id(c: &mut GlobalConfig, id: ID, _: &AdminCap) {
-    assert!(c.protocol_treasury_id.is_none(), ECanonicalObjectAlreadySet);
-    c.protocol_treasury_id = option::some(id);
+    if (c.protocol_treasury_id.is_some()) {
+        assert!(*c.protocol_treasury_id.borrow() == id, ECanonicalObjectAlreadySet);
+    } else {
+        c.protocol_treasury_id = option::some(id);
+    };
 }
 
 public fun assert_solver_registry_id(c: &GlobalConfig, id: ID) {

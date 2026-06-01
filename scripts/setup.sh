@@ -17,6 +17,16 @@ for v in "${required_vars[@]}"; do
   fi
 done
 
+set_env_var() {
+  local key=$1
+  local value=$2
+  if grep -q "^${key}=" "$ENV_FILE"; then
+    sed -i.bak "s|^${key}=.*|${key}=${value}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
+  else
+    echo "${key}=${value}" >> "$ENV_FILE"
+  fi
+}
+
 echo "=== REIY Setup ==="
 echo "Package : $REIY_PACKAGE_ID"
 echo "Config  : $GLOBAL_CONFIG_ID"
@@ -34,80 +44,80 @@ sui client ptb \
   --gas-budget "${GAS_BUDGET}"
 
 echo ""
-echo "Step 2: init_registry<${STAKE_TYPE}> ..."
-REGISTRY_OUTPUT=$(
-  sui client ptb \
-    --move-call "${REIY_PACKAGE_ID}::solver_registry::init_registry<${STAKE_TYPE}>" \
-      "@${ADMIN_CAP_ID}" \
-    --gas-budget "${GAS_BUDGET}" \
-    --json 2>&1
-) || {
-  echo "$REGISTRY_OUTPUT" >&2
-  exit 1
-}
-echo "$REGISTRY_OUTPUT" | tee /tmp/reiy_registry_deploy.json
+REGISTRY_ID=${SOLVER_REGISTRY_ID:-}
+if [[ -n "$REGISTRY_ID" ]]; then
+  echo "Step 2: use SolverRegistry ${REGISTRY_ID}"
+else
+  echo "Step 2: init_registry<${STAKE_TYPE}> ..."
+  REGISTRY_OUTPUT=$(
+    sui client ptb \
+      --move-call "${REIY_PACKAGE_ID}::solver_registry::init_registry<${STAKE_TYPE}>" \
+        "@${ADMIN_CAP_ID}" \
+      --gas-budget "${GAS_BUDGET}" \
+      --json 2>&1
+  ) || {
+    echo "$REGISTRY_OUTPUT" >&2
+    exit 1
+  }
+  echo "$REGISTRY_OUTPUT" | tee /tmp/reiy_registry_deploy.json
 
-REGISTRY_ID=$(echo "$REGISTRY_OUTPUT" | jq -r '
-  .objectChanges[]
-  | select(.type == "created")
-  | select(.objectType | test("SolverRegistry"))
-  | .objectId
-' | head -1)
+  REGISTRY_ID=$(echo "$REGISTRY_OUTPUT" | jq -r '
+    .objectChanges[]
+    | select(.type == "created")
+    | select(.objectType | test("SolverRegistry"))
+    | .objectId
+  ' | head -1)
 
-if [[ -z "$REGISTRY_ID" ]]; then
-  echo "ERROR: could not extract SolverRegistry ID" >&2
-  exit 1
+  if [[ -z "$REGISTRY_ID" ]]; then
+    echo "ERROR: could not extract SolverRegistry ID" >&2
+    exit 1
+  fi
+  echo "SolverRegistry: $REGISTRY_ID"
+  set_env_var SOLVER_REGISTRY_ID "$REGISTRY_ID"
 fi
-echo "SolverRegistry: $REGISTRY_ID"
 
 sui client ptb \
   --move-call "${REIY_PACKAGE_ID}::config::set_solver_registry_id" \
     "@${GLOBAL_CONFIG_ID}" "@${REGISTRY_ID}" "@${ADMIN_CAP_ID}" \
   --gas-budget "${GAS_BUDGET}"
 
-if grep -q "^SOLVER_REGISTRY_ID=" "$ENV_FILE"; then
-  sed -i.bak "s|^SOLVER_REGISTRY_ID=.*|SOLVER_REGISTRY_ID=${REGISTRY_ID}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
-else
-  echo "SOLVER_REGISTRY_ID=${REGISTRY_ID}" >> "$ENV_FILE"
-fi
-
 echo ""
-echo "Step 3: init_treasury<${USDC_TYPE},${STAKE_TYPE}> ..."
-TREASURY_OUTPUT=$(
-  sui client ptb \
-    --move-call "${REIY_PACKAGE_ID}::treasury::init_treasury<${USDC_TYPE},${STAKE_TYPE}>" \
-      "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
-    --gas-budget "${GAS_BUDGET}" \
-    --json 2>&1
-) || {
-  echo "$TREASURY_OUTPUT" >&2
-  exit 1
-}
-echo "$TREASURY_OUTPUT" | tee /tmp/reiy_treasury_deploy.json
+TREASURY_ID=${PROTOCOL_TREASURY_ID:-}
+if [[ -n "$TREASURY_ID" ]]; then
+  echo "Step 3: use ProtocolTreasury ${TREASURY_ID}"
+else
+  echo "Step 3: init_treasury<${USDC_TYPE},${STAKE_TYPE}> ..."
+  TREASURY_OUTPUT=$(
+    sui client ptb \
+      --move-call "${REIY_PACKAGE_ID}::treasury::init_treasury<${USDC_TYPE},${STAKE_TYPE}>" \
+        "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
+      --gas-budget "${GAS_BUDGET}" \
+      --json 2>&1
+  ) || {
+    echo "$TREASURY_OUTPUT" >&2
+    exit 1
+  }
+  echo "$TREASURY_OUTPUT" | tee /tmp/reiy_treasury_deploy.json
 
-TREASURY_ID=$(echo "$TREASURY_OUTPUT" | jq -r '
-  .objectChanges[]
-  | select(.type == "created")
-  | select(.objectType | test("ProtocolTreasury"))
-  | .objectId
-' | head -1)
+  TREASURY_ID=$(echo "$TREASURY_OUTPUT" | jq -r '
+    .objectChanges[]
+    | select(.type == "created")
+    | select(.objectType | test("ProtocolTreasury"))
+    | .objectId
+  ' | head -1)
 
-if [[ -z "$TREASURY_ID" ]]; then
-  echo "ERROR: could not extract ProtocolTreasury ID" >&2
-  exit 1
+  if [[ -z "$TREASURY_ID" ]]; then
+    echo "ERROR: could not extract ProtocolTreasury ID" >&2
+    exit 1
+  fi
+  echo "ProtocolTreasury: $TREASURY_ID"
+  set_env_var PROTOCOL_TREASURY_ID "$TREASURY_ID"
 fi
-echo "ProtocolTreasury: $TREASURY_ID"
 
 sui client ptb \
   --move-call "${REIY_PACKAGE_ID}::config::set_protocol_treasury_id" \
     "@${GLOBAL_CONFIG_ID}" "@${TREASURY_ID}" "@${ADMIN_CAP_ID}" \
   --gas-budget "${GAS_BUDGET}"
-
-if grep -q "^PROTOCOL_TREASURY_ID=" "$ENV_FILE"; then
-  sed -i.bak "s|^PROTOCOL_TREASURY_ID=.*|PROTOCOL_TREASURY_ID=${TREASURY_ID}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
-else
-  echo "PROTOCOL_TREASURY_ID=${TREASURY_ID}" >> "$ENV_FILE"
-fi
 
 add_numeraire_pool_if_set() {
   local token_label=$1

@@ -49,6 +49,10 @@ fun test_setters_and_allowlists() {
         assert!(config::max_allocation_intents(&cfg) == 16, 6);
         config::set_max_allocation_pairs(&mut cfg, 4, &cap);
         assert!(config::max_allocation_pairs(&cfg) == 4, 7);
+        let registry_id = config::solver_registry_id(&cfg);
+        let treasury_id = config::protocol_treasury_id(&cfg);
+        config::set_solver_registry_id(&mut cfg, registry_id, &cap);
+        config::set_protocol_treasury_id(&mut cfg, treasury_id, &cap);
         assert!(config::is_pair_supported(&cfg, &reiy::types::pair_key<TOKA, USDC>()), 2);
         config::remove_supported_pair<TOKA, USDC>(&mut cfg, &cap);
         assert!(!config::is_pair_supported(&cfg, &reiy::types::pair_key<TOKA, USDC>()), 3);
