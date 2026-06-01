@@ -10,6 +10,7 @@
 #   make deploy-mainnet     — publish to mainnet (requires confirmation)
 #   make setup-mainnet      — post-deploy mainnet setup
 #   make verify-mainnet     — verify mainnet objects
+#   make example-intents     — submit example intents (COUNT=3)
 #
 # Before first run:
 #   cp .env.testnet.example .env.testnet   # then fill in pool IDs etc.
@@ -20,6 +21,7 @@ SHELL        := /bin/bash
 PACKAGE_PATH  := .
 PKG_NAME      := reiy
 SCRIPTS       := $(CURDIR)/scripts
+EXAMPLES      := $(CURDIR)/examples
 
 # Defaults — override from env or command line
 GAS_TESTNET   ?= 500000000
@@ -56,6 +58,7 @@ help:
 	@echo ""
 	@echo "  make clean              remove build artifacts"
 	@echo "  make mint-testnet       mint test coins  (TOKEN=WUSDC AMOUNT=1000000000000)"
+	@echo "  make example-intents    submit example testnet intents (COUNT=3)"
 	@echo ""
 
 # ─── Build & Test ────────────────────────────────────────────────────────────
@@ -138,6 +141,27 @@ mint-testnet: _env-testnet-check
 	    --move-call "0x2::coin::mint_and_transfer<$${COIN_TYPE}>" \
 	      "@$${CAP}" "$$AMOUNT" "@$$DEST" \
 	    --gas-budget $(GAS_TESTNET)
+
+# ─── Examples ────────────────────────────────────────────────────────────────
+
+# Submit example intents to testnet.
+# Usage:
+#   make example-intents COUNT=5
+#   make example-intents SELL_AMOUNT=10000000 SLIPPAGE_BPS=500 PARTIAL_FILLABLE=false
+.PHONY: example-intents
+example-intents: _env-testnet-check
+	@sui client switch --env testnet
+	@ENV_FILE=$(ENV_TESTNET) \
+	  COUNT=$(or $(COUNT),1) \
+	  SELL_AMOUNT=$(or $(SELL_AMOUNT),10000000) \
+	  SLIPPAGE_BPS=$(or $(SLIPPAGE_BPS),500) \
+	  TTL_MS=$(or $(TTL_MS),3600000) \
+	  PARTIAL_FILLABLE=$(or $(PARTIAL_FILLABLE),false) \
+	  DIRECTION=$(or $(DIRECTION),base_to_quote) \
+	  SOURCE_COIN=$(or $(SOURCE_COIN),gas) \
+	  REFRESH_DEEPBOOK=$(or $(REFRESH_DEEPBOOK),1) \
+	  GAS_BUDGET=$(GAS_TESTNET) \
+	  bash $(EXAMPLES)/submit_intents.sh
 
 # ─── Testnet ─────────────────────────────────────────────────────────────────
 
