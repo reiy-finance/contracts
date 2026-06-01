@@ -145,6 +145,7 @@ mint-testnet: _env-testnet-check
 deploy-testnet: build _env-testnet-check
 	@echo "Switching to testnet..."
 	@sui client switch --env testnet
+	@rm -f Published.toml
 	@echo "Publishing REIY to testnet..."
 	sui client publish $(PACKAGE_PATH) \
 		--gas-budget $(GAS_TESTNET) \
@@ -172,6 +173,7 @@ verify-testnet: _env-testnet-check
 deploy-mainnet: build-mainnet _env-mainnet-check _confirm-mainnet
 	@echo "Switching to mainnet..."
 	@sui client switch --env mainnet
+	@rm -f Published.toml
 	@echo "Publishing REIY to MAINNET..."
 	sui client publish $(PACKAGE_PATH) \
 		--gas-budget $(GAS_MAINNET) \
