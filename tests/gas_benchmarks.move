@@ -14,8 +14,8 @@ use sui::clock::Clock;
 use sui::test_scenario::{Self as ts, Scenario};
 use reiy::config::GlobalConfig;
 use reiy::auction::{Self, AuctionState};
+use reiy::fee_vault::FeeVault;
 use reiy::solver_registry::{Self as reg, SolverRegistry};
-use reiy::treasury::ProtocolTreasury;
 use reiy::settlement;
 use reiy::test_helpers::{Self as h, USDC, TOKA};
 
@@ -74,19 +74,23 @@ fun advance(sc: &mut Scenario, clock: &Clock) {
     ts::return_shared(state);
 }
 
-/// Settle the next available TOKA->USDC intent (LIFO order from take_shared).
-/// Call in reverse intent-creation order to keep EPSR ratio consistent.
+/// Settle the next available TOKA->USDC intent using injected normalized values.
+/// Passes score/floor = payout so actual_score = gross - protected_min ≈ payout - floor.
 fun settle_next(sc: &mut Scenario, payout: u64, clock: &Clock) {
     ts::next_tx(sc, SOLVER);
     let mut state    = ts::take_shared<AuctionState>(sc);
     let mut registry = ts::take_shared<SolverRegistry<SUI>>(sc);
+    let cfg          = ts::take_shared<GlobalConfig>(sc);
+    let mut vault    = ts::take_shared<FeeVault<USDC>>(sc);
     let intent       = ts::take_shared<reiy::intent_book::Intent<TOKA, USDC>>(sc);
     let (sell_coin, receipt) = settlement::take_intent_full(&mut state, intent, clock, ts::ctx(sc));
     h::burn(sell_coin);
     settlement::settle_intent_with_values_for_testing(
-        &mut state, &mut registry, receipt,
-        h::mint<USDC>(payout, ts::ctx(sc)), payout, payout,
+        &mut state, &mut registry, &cfg, &mut vault, receipt,
+        h::mint<USDC>(payout, ts::ctx(sc)), payout, payout, ts::ctx(sc),
     );
+    ts::return_shared(vault);
+    ts::return_shared(cfg);
     ts::return_shared(registry);
     ts::return_shared(state);
 }
@@ -312,7 +316,7 @@ fun bench_close_batch_2_intents() {
     };
     clock.set_for_testing(14_000);
     advance(&mut sc, &clock);
-    // settle in reverse creation order (LIFO) so EPSR ratio stays uniform
+    // settle in reverse creation order (LIFO) so UCP ratio stays uniform
     settle_next(&mut sc, 2_090, &clock); // id2 (last created)
     settle_next(&mut sc, 4_180, &clock); // id1
     ts::next_tx(&mut sc, SOLVER);
@@ -320,11 +324,11 @@ fun bench_close_batch_2_intents() {
         let mut state    = ts::take_shared<AuctionState>(&mut sc);
         let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg          = ts::take_shared<GlobalConfig>(&mut sc);
-        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
-        settlement::close_batch(&mut state, &cfg, &mut registry, &mut treasury, h::mint<USDC>(100, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc));
-        ts::return_shared(treasury);
-        ts::return_shared(registry);
+        let mut vault    = ts::take_shared<FeeVault<USDC>>(&mut sc);
+        settlement::close_batch<USDC, SUI>(&mut state, &cfg, &mut registry, &mut vault, &clock, ts::ctx(&mut sc));
+        ts::return_shared(vault);
         ts::return_shared(cfg);
+        ts::return_shared(registry);
         ts::return_shared(state);
     };
     clock.destroy_for_testing();
@@ -394,11 +398,11 @@ fun bench_full_epoch_5_intents() {
         let mut state    = ts::take_shared<AuctionState>(&mut sc);
         let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
         let cfg          = ts::take_shared<GlobalConfig>(&mut sc);
-        let mut treasury = ts::take_shared<ProtocolTreasury<USDC, SUI>>(&mut sc);
-        settlement::close_batch(&mut state, &cfg, &mut registry, &mut treasury, h::mint<USDC>(500, ts::ctx(&mut sc)), &clock, ts::ctx(&mut sc));
-        ts::return_shared(treasury);
-        ts::return_shared(registry);
+        let mut vault    = ts::take_shared<FeeVault<USDC>>(&mut sc);
+        settlement::close_batch<USDC, SUI>(&mut state, &cfg, &mut registry, &mut vault, &clock, ts::ctx(&mut sc));
+        ts::return_shared(vault);
         ts::return_shared(cfg);
+        ts::return_shared(registry);
         ts::return_shared(state);
     };
     clock.destroy_for_testing();

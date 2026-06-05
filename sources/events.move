@@ -163,6 +163,49 @@ public struct ConfigUpdatedEvent has copy, drop {
 public struct RoleGrantedEvent has copy, drop { member: address, role: u64 }
 public struct RoleRevokedEvent has copy, drop { member: address, role: u64 }
 
+public struct FeeVaultRegisteredEvent has copy, drop {
+    token_type: TypeName,
+    vault_id: ID,
+}
+
+public struct PairFeeTierUpdatedEvent has copy, drop {
+    pair_sell_type: TypeName,
+    pair_buy_type: TypeName,
+    tier_tag: u8, // 0=Standard, 1=Correlated, 2=Custom, 3=Disabled
+}
+
+public struct SettlementFeeChargedEvent has copy, drop {
+    intent_id: ID,
+    solver: address,
+    epoch: u64,
+    gross_payout: u64,
+    protected_min: u64,
+    volume_fee: u64,
+    surplus_fee: u64,
+    total_fee: u64,
+    net_user_payout: u64,
+    created_surplus: u64,
+    net_user_surplus: u64,
+    fee_token: TypeName,
+}
+
+public struct BatchFeeSummaryEvent has copy, drop {
+    epoch: u64,
+    total_volume_fee: u64,
+    total_surplus_fee: u64,
+    total_protocol_fee: u64,
+    settled_intent_count: u64,
+}
+
+public struct SolverRewardPaidEvent has copy, drop {
+    epoch: u64,
+    solver: address,
+    reward_amount: u64,
+    performance_excess: u64,
+    reward_cap: u64,
+    fee_token: TypeName,
+}
+
 // === Emit functions ===
 
 public(package) fun emit_intent_created(
@@ -380,4 +423,72 @@ public(package) fun emit_role_granted(member: address, role: u64) {
 
 public(package) fun emit_role_revoked(member: address, role: u64) {
     event::emit(RoleRevokedEvent { member, role });
+}
+
+public(package) fun emit_fee_vault_registered(token_type: TypeName, vault_id: ID) {
+    event::emit(FeeVaultRegisteredEvent { token_type, vault_id });
+}
+
+public(package) fun emit_settlement_fee_charged(
+    intent_id: ID,
+    solver: address,
+    epoch: u64,
+    gross_payout: u64,
+    protected_min: u64,
+    volume_fee: u64,
+    surplus_fee: u64,
+    total_fee: u64,
+    net_user_payout: u64,
+    created_surplus: u64,
+    net_user_surplus: u64,
+    fee_token: TypeName,
+) {
+    event::emit(SettlementFeeChargedEvent {
+        intent_id,
+        solver,
+        epoch,
+        gross_payout,
+        protected_min,
+        volume_fee,
+        surplus_fee,
+        total_fee,
+        net_user_payout,
+        created_surplus,
+        net_user_surplus,
+        fee_token,
+    });
+}
+
+public(package) fun emit_batch_fee_summary(
+    epoch: u64,
+    total_volume_fee: u64,
+    total_surplus_fee: u64,
+    total_protocol_fee: u64,
+    settled_intent_count: u64,
+) {
+    event::emit(BatchFeeSummaryEvent {
+        epoch,
+        total_volume_fee,
+        total_surplus_fee,
+        total_protocol_fee,
+        settled_intent_count,
+    });
+}
+
+public(package) fun emit_solver_reward_paid(
+    epoch: u64,
+    solver: address,
+    reward_amount: u64,
+    performance_excess: u64,
+    reward_cap: u64,
+    fee_token: TypeName,
+) {
+    event::emit(SolverRewardPaidEvent {
+        epoch,
+        solver,
+        reward_amount,
+        performance_excess,
+        reward_cap,
+        fee_token,
+    });
 }

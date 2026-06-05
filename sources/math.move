@@ -3,6 +3,7 @@ module reiy::math;
 
 const K_SCALE: u128 = 1_000_000_000;
 const BPS_DENOM: u128 = 10_000;
+const PPM_DENOM: u128 = 1_000_000;
 
 #[error]
 const EDivideByZero: vector<u8> = b"denominator must be non-zero";
@@ -12,6 +13,8 @@ const EOverflow: vector<u8> = b"result exceeds u64::MAX";
 public fun k_scale(): u64 { K_SCALE as u64 }
 
 public fun bps_denom(): u64 { BPS_DENOM as u64 }
+
+public fun ppm_denom(): u64 { PPM_DENOM as u64 }
 
 /// `floor(a * b / denom)` in u128.
 public fun mul_div_floor(a: u64, b: u64, denom: u64): u64 {

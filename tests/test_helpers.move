@@ -8,6 +8,7 @@ use sui::sui::SUI;
 use sui::test_scenario::{Self as ts, Scenario};
 use reiy::config::{Self, GlobalConfig, AdminCap};
 use reiy::auction;
+use reiy::fee_vault;
 use reiy::solver_registry;
 use reiy::treasury;
 
@@ -28,7 +29,7 @@ public fun new_clock(ctx: &mut TxContext): Clock {
     clock::create_for_testing(ctx)
 }
 
-/// Initialize canonical test protocol objects.
+/// Initialize canonical test protocol objects including FeeVault<USDC>.
 public fun setup_all(scenario: &mut Scenario, admin: address) {
     ts::next_tx(scenario, admin);
     {
@@ -48,6 +49,9 @@ public fun setup_all(scenario: &mut Scenario, admin: address) {
         let treasury_id = treasury::init_treasury<USDC, SUI>(&cfg, &cap, ts::ctx(scenario));
         config::set_solver_registry_id(&mut cfg, registry_id, &cap);
         config::set_protocol_treasury_id(&mut cfg, treasury_id, &cap);
+        // Create and register the canonical FeeVault<USDC>
+        let vault_id = fee_vault::init_fee_vault<USDC>(&cap, ts::ctx(scenario));
+        config::register_fee_vault<USDC>(&mut cfg, vault_id, &cap);
         ts::return_to_sender(scenario, cap);
         ts::return_shared(cfg);
     };

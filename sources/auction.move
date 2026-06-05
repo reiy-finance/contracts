@@ -131,12 +131,13 @@ public struct Allocation has drop, store {
     stake_reserved: u64,
 }
 
-/// EPSR reference ratio anchored to the first settled intent of a directed pair.
-/// Subsequent intents in the same pair must match this ratio exactly.
-/// * `floor_ref`  - Benchmark floor of the reference intent
-/// * `payout_ref` - Net payout of the reference intent
-public struct RatioRef has copy, drop, store {
-    floor_ref: u64,
+/// UCP (Uniform Clearing Price) reference anchored to the first settled intent of a directed pair.
+/// Subsequent intents in the same pair must match this clearing price exactly:
+///   gross_payout_i * sell_ref == gross_payout_ref * sell_i
+/// * `sell_ref`   - Sell amount of the reference intent
+/// * `payout_ref` - Gross payout of the reference intent
+public struct UCPRef has copy, drop, store {
+    sell_ref: u64,
     payout_ref: u64,
 }
 
@@ -164,11 +165,13 @@ public struct RatioRef has copy, drop, store {
 /// * `current_epoch_score_surplus` - Accumulated verified normalized surplus so far this epoch
 /// * `settled_intent_count`      - Number of winning intents fully settled this epoch
 /// * `settled_score_value_sum`   - Accumulated normalized floor value of settled intents (for fee calc)
-/// * `pair_ratio_refs`           - EPSR reference ratio per directed pair set by first settled intent
+/// * `pair_ucp_refs`           - EPSR reference ratio per directed pair set by first settled intent
 /// * `intent_settled`            - IDs of intents already settled; prevents double-consume
 /// * `solver_actual_score`       - Verified score contribution per solver; used for reward split
 /// * `winner_reservation_of`     - Maps each winning intent to its bid/benchmark reservation
 /// * `winning_reservations`      - Reservations retained for settlement close/fallback
+/// * `batch_total_fee_collected` - Cumulative protocol fees (in Buy/N) collected during settlement
+/// * `committed_benchmark_score` - Reference score (sum of pair benchmark scores); used in VCG reward
 public struct AuctionState has key {
     id: UID,
     current_epoch: u64,
@@ -194,11 +197,13 @@ public struct AuctionState has key {
     current_epoch_score_surplus: u64,
     settled_intent_count: u64,
     settled_score_value_sum: u64,
-    pair_ratio_refs: VecMap<PairKey, RatioRef>,
+    pair_ucp_refs: VecMap<PairKey, UCPRef>,
     intent_settled: VecSet<ID>,
     solver_actual_score: VecMap<address, u64>,
     winner_reservation_of: VecMap<ID, StakeReservationKey>,
     winning_reservations: VecSet<StakeReservationKey>,
+    batch_total_fee_collected: u64,
+    committed_benchmark_score: u64,
 }
 
 fun init(ctx: &mut TxContext) {
@@ -231,11 +236,13 @@ fun new_state(ctx: &mut TxContext): AuctionState {
         current_epoch_score_surplus: 0,
         settled_intent_count: 0,
         settled_score_value_sum: 0,
-        pair_ratio_refs: vec_map::empty(),
+        pair_ucp_refs: vec_map::empty(),
         intent_settled: vec_set::empty(),
         solver_actual_score: vec_map::empty(),
         winner_reservation_of: vec_map::empty(),
         winning_reservations: vec_set::empty(),
+        batch_total_fee_collected: 0,
+        committed_benchmark_score: 0,
     }
 }
 
@@ -457,11 +464,13 @@ fun start_new_epoch(state: &mut AuctionState, config: &GlobalConfig, now: u64) {
     state.current_epoch_score_surplus = 0;
     state.settled_intent_count = 0;
     state.settled_score_value_sum = 0;
-    state.pair_ratio_refs = vec_map::empty();
+    state.pair_ucp_refs = vec_map::empty();
     state.intent_settled = vec_set::empty();
     state.solver_actual_score = vec_map::empty();
     state.winner_reservation_of = vec_map::empty();
     state.winning_reservations = vec_set::empty();
+    state.batch_total_fee_collected = 0;
+    state.committed_benchmark_score = 0;
     state.batch = vec_set::empty();
     state.intent_meta = vec_map::empty();
     let reqs = state.requeued.into_keys();
@@ -577,7 +586,7 @@ fun assert_bid_epsr_consistent(
     m_effs: &vector<u64>,
 ) {
     let n = pairs.length();
-    let mut refs = vec_map::empty<PairKey, RatioRef>();
+    let mut refs = vec_map::empty<PairKey, UCPRef>();
     let mut i = 0;
     while (i < n) {
         let p = pairs[i];
@@ -588,12 +597,12 @@ fun assert_bid_epsr_consistent(
                     payouts[i],
                     m_effs[i],
                     r.payout_ref,
-                    r.floor_ref,
+                    r.sell_ref,
                 ),
                 EBidEpsrInconsistent,
             );
         } else {
-            refs.insert(p, RatioRef { floor_ref: m_effs[i], payout_ref: payouts[i] });
+            refs.insert(p, UCPRef { sell_ref: m_effs[i], payout_ref: payouts[i] });
         };
         i = i + 1;
     };
@@ -895,16 +904,31 @@ fun commit_winner_from_allocation(
         let seq = bid_seqs[i];
         let solver = state.bids[seq].solver;
         let intents = state.bids[seq].intents;
+        let fills = state.bids[seq].fills;
         let payouts = state.bids[seq].payouts;
         let m_effs = state.bids[seq].m_effs;
         let pairs = state.bids[seq].pairs;
         let reservation_key = solver_registry::bid_reservation_key(state.current_epoch, seq);
-        commit_bid_intents(state, solver, reservation_key, &intents, &payouts, &m_effs, &pairs);
+        commit_bid_intents(state, solver, reservation_key, &intents, &fills, &payouts, &m_effs, &pairs);
         i = i + 1;
     };
+    // Reference score = sum of benchmark scores for committed pairs (VCG counterfactual)
+    let committed_pairs = state.committed_k_by_pair.keys();
+    let mut bm_score = 0u64;
+    let mut pi = 0;
+    let np = committed_pairs.length();
+    while (pi < np) {
+        let p = committed_pairs[pi];
+        if (state.pair_benchmarks.contains(&p)) {
+            bm_score = bm_score + state.pair_benchmarks.get(&p).total_score;
+        };
+        pi = pi + 1;
+    };
+    state.committed_benchmark_score = bm_score;
 }
 
 fun commit_winner_from_benchmarks(state: &mut AuctionState, _config: &GlobalConfig) {
+    state.committed_benchmark_score = 0; // benchmark IS the winner; no competing reference
     let pairs = state.pair_benchmarks.keys();
     let mut total = 0u64;
     let mut i = 0;
@@ -917,6 +941,8 @@ fun commit_winner_from_benchmarks(state: &mut AuctionState, _config: &GlobalConf
         let intents = entry.intents;
         let payouts = entry.payouts;
         total = total + entry.total_score;
+        // For benchmarks, fill = full sell_amount from intent_meta
+        let mut fills = vector[];
         let mut m_effs = vector[];
         let mut pks = vector[];
         let mut j = 0;
@@ -924,11 +950,12 @@ fun commit_winner_from_benchmarks(state: &mut AuctionState, _config: &GlobalConf
         while (j < bn) {
             let id = intents[j];
             let meta = state.intent_meta.get(&id);
+            fills.push_back(meta.sell_amount);
             m_effs.push_back(meta.min_amount_out);
             pks.push_back(meta.pair);
             j = j + 1;
         };
-        commit_bid_intents(state, auctioneer, reservation_key, &intents, &payouts, &m_effs, &pks);
+        commit_bid_intents(state, auctioneer, reservation_key, &intents, &fills, &payouts, &m_effs, &pks);
         i = i + 1;
     };
     state.committed_total_score = total;
@@ -939,6 +966,7 @@ fun commit_bid_intents(
     solver: address,
     reservation_key: StakeReservationKey,
     intents: &vector<ID>,
+    fills: &vector<u64>,
     payouts: &vector<u64>,
     m_effs: &vector<u64>,
     pairs: &vector<PairKey>,
@@ -956,8 +984,9 @@ fun commit_bid_intents(
         if (!state.winning_reservations.contains(&reservation_key)) {
             state.winning_reservations.insert(reservation_key);
         };
+        // committed_k uses UCP: payout / fill_amount (price per unit sold)
         if (!state.committed_k_by_pair.contains(&pairs[i])) {
-            state.committed_k_by_pair.insert(pairs[i], math::fixed_ratio(payouts[i], floor));
+            state.committed_k_by_pair.insert(pairs[i], math::fixed_ratio(payouts[i], fills[i]));
         };
         i = i + 1;
     };
@@ -1082,23 +1111,25 @@ public(package) fun settlement_deadline_ms(state: &AuctionState): u64 {
     state.settlement_deadline_ms
 }
 
+/// Record a settled intent. Uses gross_payout/sell_amount for UCP consistency check.
+/// score_value is normalized gross created surplus; floor_value is normalized protected_min.
 public(package) fun record_settlement(
     state: &mut AuctionState,
     pair: PairKey,
     solver: address,
-    payout: u64,
-    floor: u64,
+    gross_payout: u64,
+    sell_amount: u64,
     score_value: u64,
     floor_value: u64,
 ) {
-    if (state.pair_ratio_refs.contains(&pair)) {
-        let r = state.pair_ratio_refs.get(&pair);
+    if (state.pair_ucp_refs.contains(&pair)) {
+        let r = state.pair_ucp_refs.get(&pair);
         assert!(
-            math::cross_ratio_equal(payout, floor, r.payout_ref, r.floor_ref),
+            math::cross_ratio_equal(gross_payout, sell_amount, r.payout_ref, r.sell_ref),
             EBidEpsrInconsistent,
         );
     } else {
-        state.pair_ratio_refs.insert(pair, RatioRef { floor_ref: floor, payout_ref: payout });
+        state.pair_ucp_refs.insert(pair, UCPRef { sell_ref: sell_amount, payout_ref: gross_payout });
     };
     state.current_epoch_score_surplus = state.current_epoch_score_surplus + score_value;
     state.settled_score_value_sum = state.settled_score_value_sum + floor_value;
@@ -1112,8 +1143,8 @@ public(package) fun record_settlement(
 }
 
 public(package) fun actual_k_of_pair(state: &AuctionState, pair: &PairKey): u64 {
-    let r = state.pair_ratio_refs.get(pair);
-    math::fixed_ratio(r.payout_ref, r.floor_ref)
+    let r = state.pair_ucp_refs.get(pair);
+    math::fixed_ratio(r.payout_ref, r.sell_ref)
 }
 
 public(package) fun committed_k_of_pair(state: &AuctionState, pair: &PairKey): u64 {
@@ -1130,6 +1161,18 @@ public(package) fun solver_actual_score(state: &AuctionState, solver: address): 
 
 public(package) fun winning_solver_list(state: &AuctionState): vector<address> {
     state.solver_actual_score.keys()
+}
+
+public(package) fun batch_total_fee_collected(state: &AuctionState): u64 {
+    state.batch_total_fee_collected
+}
+
+public(package) fun committed_benchmark_score(state: &AuctionState): u64 {
+    state.committed_benchmark_score
+}
+
+public(package) fun accumulate_batch_fee(state: &mut AuctionState, amount: u64) {
+    state.batch_total_fee_collected = state.batch_total_fee_collected + amount;
 }
 
 public(package) fun requeue_intent(

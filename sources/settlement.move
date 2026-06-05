@@ -1,12 +1,14 @@
 // Copyright (c) Reiy Finance
 
-/// Intent settlement, rewards, and fallback slashing.
+/// Intent settlement, fallback slashing. Fees are split from Coin<Buy> per settlement;
+/// close_batch only verifies score/UCP and releases reservations.
 module reiy::settlement;
 
 use deepbook::pool::Pool;
 use reiy::auction::{Self, AuctionState};
 use reiy::config::GlobalConfig;
 use reiy::events;
+use reiy::fee_vault::{Self, FeeVault};
 use reiy::intent_book::{Self, Intent};
 use reiy::math;
 use reiy::price_adapter;
@@ -30,7 +32,7 @@ const EIntentExpired: vector<u8> = b"intent has expired";
 #[error]
 const EBelowMinimum: vector<u8> = b"payout below effective minimum";
 #[error]
-const EBelowFloor: vector<u8> = b"payout below benchmark floor";
+const EBelowFloor: vector<u8> = b"payout below benchmark floor (after volume fee)";
 #[error]
 const EBadNumerairePool: vector<u8> = b"numeraire pool does not match buy token / allowlist";
 #[error]
@@ -43,8 +45,6 @@ const EScoreMismatch: vector<u8> = b"actual score below committed score";
 const EKMismatch: vector<u8> = b"actual k below committed k";
 #[error]
 const ENotAllSettled: vector<u8> = b"not all winning intents settled";
-#[error]
-const EFeeTooSmall: vector<u8> = b"protocol fee below required";
 #[error]
 const ETooEarly: vector<u8> = b"settlement deadline not yet passed";
 #[error]
@@ -98,8 +98,7 @@ public fun take_intent_full<Sell, Buy>(
     (coin::from_balance(balance, ctx), receipt)
 }
 
-/// Take a partially-filled winning intent. Splits `fill_amount` off the locked balance, advances the
-/// intent to the next epoch, and re-queues its residual so it re-enters the next batch.
+/// Take a partially-filled winning intent and requeue the residual.
 public fun take_intent_partial<Sell, Buy>(
     state: &mut AuctionState,
     intent: &mut Intent<Sell, Buy>,
@@ -145,68 +144,105 @@ public fun take_intent_partial<Sell, Buy>(
 // === Settle ===
 
 /// Settle a winning intent whose BUY token IS the protocol numeraire.
+/// Fees are split from `payout: Coin<Buy>` and deposited into `fee_vault`.
 public fun settle_intent_numeraire<Sell, Buy, Stake>(
     state: &mut AuctionState,
     registry: &mut SolverRegistry<Stake>,
     config: &GlobalConfig,
+    fee_vault: &mut FeeVault<Buy>,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
+    ctx: &mut TxContext,
 ) {
     assert_solver_registry(config, registry);
     assert!(type_name::with_defining_ids<Buy>() == config.numeraire_type(), ENotNumeraire);
-    let net = payout.value();
-    let (raw_surplus, floor) = verify_payout(&receipt, net);
-    finalize_settlement(state, registry, receipt, payout, raw_surplus, floor);
+    fee_vault::assert_canonical<Buy>(config, fee_vault);
+
+    let gross = payout.value();
+    let protected_min = max_u64(receipt.m_eff, receipt.floor);
+    let (volume_fee, surplus_fee, total_fee) = compute_fees(config, &receipt.pair, gross, protected_min);
+    let net = gross - total_fee;
+
+    finalize_settlement(
+        state, registry, config, fee_vault, receipt, payout,
+        gross, protected_min, volume_fee, surplus_fee, total_fee, net,
+        // score_value = created_surplus in numeraire units (Buy == N)
+        gross - protected_min,
+        protected_min,
+        ctx,
+    );
 }
 
-/// Settle a winning intent, normalizing its surplus into numeraire units using the allowlisted
+/// Settle a winning intent, normalizing surplus into numeraire units using the allowlisted
 /// `Buy/Numeraire` DeepBook pool.
 public fun settle_intent<Sell, Buy, NumBase, NumQuote, Stake>(
     state: &mut AuctionState,
     registry: &mut SolverRegistry<Stake>,
     config: &GlobalConfig,
+    fee_vault: &mut FeeVault<Buy>,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
     num_pool: &Pool<NumBase, NumQuote>,
     clock: &Clock,
+    ctx: &mut TxContext,
 ) {
     assert_solver_registry(config, registry);
-    let net = payout.value();
-    let (raw_surplus, floor) = verify_payout(&receipt, net);
+    fee_vault::assert_canonical<Buy>(config, fee_vault);
 
     let buy_t = type_name::with_defining_ids<Buy>();
     let expected = config.numeraire_pool_id(buy_t);
     assert!(expected.is_some() && *expected.borrow() == object::id(num_pool), EBadNumerairePool);
 
+    let gross = payout.value();
+    let protected_min = max_u64(receipt.m_eff, receipt.floor);
+    let (volume_fee, surplus_fee, total_fee) = compute_fees(config, &receipt.pair, gross, protected_min);
+    let net = gross - total_fee;
+
     let mid = price_adapter::read_mid_price(num_pool, config, clock);
     let (score_value, floor_value) = normalize_surplus<Buy, NumBase, NumQuote>(
         config,
-        raw_surplus,
-        floor,
+        gross - protected_min, // created_surplus in Buy
+        protected_min,
         mid,
     );
-    finalize_settlement_normalized(
-        state,
-        registry,
-        receipt,
-        payout,
-        raw_surplus,
-        floor,
+
+    finalize_settlement(
+        state, registry, config, fee_vault, receipt, payout,
+        gross, protected_min, volume_fee, surplus_fee, total_fee, net,
         score_value,
         floor_value,
+        ctx,
     );
 }
 
-fun verify_payout<Sell, Buy>(receipt: &SettlementReceipt<Sell, Buy>, net: u64): (u64, u64) {
-    assert!(net >= receipt.m_eff, EBelowMinimum);
-    assert!(net >= receipt.floor, EBelowFloor);
-    (net - receipt.floor, receipt.floor)
+// === Fee computation ===
+
+/// Returns (volume_fee, surplus_fee, total_fee) all in Buy token units.
+fun compute_fees(config: &GlobalConfig, pair: &PairKey, gross: u64, protected_min: u64): (u64, u64, u64) {
+    let vol_ppm = config.volume_fee_ppm_for_pair(pair);
+    let volume_fee = math::mul_div_floor(gross, vol_ppm, math::ppm_denom());
+    let payout_after_volume = gross - volume_fee;
+
+    assert!(payout_after_volume >= protected_min, EBelowFloor);
+
+    let surplus_after_volume = payout_after_volume - protected_min;
+    let surplus_fee_by_share = math::mul_div_floor(surplus_after_volume, config.surplus_fee_ppm(), math::ppm_denom());
+    let surplus_fee_by_cap = math::mul_div_floor(gross, config.surplus_fee_cap_ppm(), math::ppm_denom());
+    let surplus_fee = if (surplus_fee_by_share < surplus_fee_by_cap) surplus_fee_by_share else surplus_fee_by_cap;
+
+    let total_uncapped = volume_fee + surplus_fee;
+    let total_cap = math::mul_div_floor(gross, config.max_total_fee_ppm(), math::ppm_denom());
+    let total_fee = if (total_uncapped < total_cap) total_uncapped else total_cap;
+
+    (volume_fee, surplus_fee, total_fee)
 }
+
+fun max_u64(a: u64, b: u64): u64 { if (a >= b) a else b }
 
 fun normalize_surplus<Buy, NumBase, NumQuote>(
     config: &GlobalConfig,
-    raw_surplus: u64,
-    floor: u64,
+    created_surplus: u64,
+    protected_min: u64,
     mid: u64,
 ): (u64, u64) {
     let buy_t = type_name::with_defining_ids<Buy>();
@@ -216,25 +252,21 @@ fun normalize_surplus<Buy, NumBase, NumQuote>(
     if (buy_t == nb) {
         assert!(nq == num, EBadNumerairePool);
         (
-            price_adapter::normalize_base_to_quote(raw_surplus, mid),
-            price_adapter::normalize_base_to_quote(floor, mid),
+            price_adapter::normalize_base_to_quote(created_surplus, mid),
+            price_adapter::normalize_base_to_quote(protected_min, mid),
         )
     } else {
         assert!(buy_t == nq, EBadNumerairePool);
         assert!(nb == num, EBadNumerairePool);
         (
-            price_adapter::normalize_quote_to_base(raw_surplus, mid),
-            price_adapter::normalize_quote_to_base(floor, mid),
+            price_adapter::normalize_quote_to_base(created_surplus, mid),
+            price_adapter::normalize_quote_to_base(protected_min, mid),
         )
     }
 }
 
 fun assert_settlement_deadline_open(state: &AuctionState, clock: &Clock) {
     assert!(clock.timestamp_ms() <= auction::settlement_deadline_ms(state), ESettlementDeadlinePassed);
-}
-
-fun assert_treasury_numeraire<N>(config: &GlobalConfig) {
-    assert!(type_name::with_defining_ids<N>() == config.numeraire_type(), ETreasuryNumeraireMismatch);
 }
 
 fun assert_solver_registry<Stake>(config: &GlobalConfig, registry: &SolverRegistry<Stake>) {
@@ -245,64 +277,70 @@ fun assert_treasury<N, Stake>(
     config: &GlobalConfig,
     treasury: &ProtocolTreasury<N, Stake>,
 ) {
-    assert_treasury_numeraire<N>(config);
+    assert!(type_name::with_defining_ids<N>() == config.numeraire_type(), ETreasuryNumeraireMismatch);
     config.assert_protocol_treasury_id(treasury::id(treasury));
 }
 
+#[allow(lint(self_transfer))]
 fun finalize_settlement<Sell, Buy, Stake>(
     state: &mut AuctionState,
     registry: &mut SolverRegistry<Stake>,
+    _config: &GlobalConfig,
+    fee_vault: &mut FeeVault<Buy>,
     receipt: SettlementReceipt<Sell, Buy>,
-    payout: Coin<Buy>,
-    raw_surplus: u64,
-    floor: u64,
-) {
-    // buy == numeraire: surplus/floor already in numeraire units
-    finalize_settlement_normalized(
-        state,
-        registry,
-        receipt,
-        payout,
-        raw_surplus,
-        floor,
-        raw_surplus,
-        floor,
-    );
-}
-
-fun finalize_settlement_normalized<Sell, Buy, Stake>(
-    state: &mut AuctionState,
-    registry: &mut SolverRegistry<Stake>,
-    receipt: SettlementReceipt<Sell, Buy>,
-    payout: Coin<Buy>,
-    raw_surplus: u64,
-    floor: u64,
+    mut payout: Coin<Buy>,
+    gross: u64,
+    protected_min: u64,
+    volume_fee: u64,
+    surplus_fee: u64,
+    total_fee: u64,
+    net: u64,
     score_value: u64,
     floor_value: u64,
+    ctx: &mut TxContext,
 ) {
-    let SettlementReceipt { intent_id, owner, solver, pair, m_eff: _, floor: _, sell_amount } =
-        receipt;
-    let net = payout.value();
-    auction::record_settlement(
-        state,
-        pair,
-        solver,
-        net,
-        floor,
-        score_value,
-        floor_value,
-    );
-    auction::mark_intent_settled(state, intent_id);
-    solver_registry::record_settled(registry, solver, net);
+    let SettlementReceipt { intent_id, owner, solver, pair, m_eff: _, floor: _, sell_amount } = receipt;
+
+    // gross must be >= both m_eff and floor before fee; EBelowFloor already checked in compute_fees
+    // EBelowMinimum: gross >= m_eff check (floor check covered by compute_fees)
+    assert!(gross >= net + total_fee, EBelowMinimum); // always true, structural guard
 
     let epoch = auction::current_epoch(state);
+
+    // Split fee from payout coin and deposit into vault; accumulate for close-time reward calc
+    let fee_coin = payout.split(total_fee, ctx);
+    fee_vault::deposit_fee(fee_vault, fee_coin, epoch);
+    auction::accumulate_batch_fee(state, total_fee);
+
+    // Record settlement with UCP ref (gross/sell_amount)
+    auction::record_settlement(state, pair, solver, gross, sell_amount, score_value, floor_value);
+    auction::mark_intent_settled(state, intent_id);
+    solver_registry::record_settled(registry, solver, gross);
+
+    let created_surplus = gross - protected_min;
+    let net_user_surplus = if (net > protected_min) net - protected_min else 0;
+
+    events::emit_settlement_fee_charged(
+        intent_id,
+        solver,
+        epoch,
+        gross,
+        protected_min,
+        volume_fee,
+        surplus_fee,
+        total_fee,
+        net,
+        created_surplus,
+        net_user_surplus,
+        type_name::with_defining_ids<Buy>(),
+    );
     events::emit_settlement(
         intent_id,
         solver,
         epoch,
         sell_amount,
         net,
-        raw_surplus,
+        created_surplus,
         score_value,
         events::settle_cow(),
     );
@@ -312,21 +350,22 @@ fun finalize_settlement_normalized<Sell, Buy, Stake>(
 
 // === Close ===
 
-/// Close the batch: dual verification (score + per-pair k), fee collection, and reward distribution.
-/// All winning intents must be settled before calling.
+/// Close the batch: verify score and UCP k, distribute VCG solver rewards from fee vault,
+/// release winning reservations, advance to Close phase.
+/// `N` must be the protocol numeraire (the token type of the fee vault).
 #[allow(lint(self_transfer))]
 public fun close_batch<N, Stake>(
     state: &mut AuctionState,
     config: &GlobalConfig,
     registry: &mut SolverRegistry<Stake>,
-    treasury: &mut ProtocolTreasury<N, Stake>,
-    mut fee: Coin<N>,
+    fee_vault: &mut FeeVault<N>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
     auction::assert_settlement_phase(state);
     assert_solver_registry(config, registry);
-    assert_treasury(config, treasury);
+    assert!(type_name::with_defining_ids<N>() == config.numeraire_type(), ETreasuryNumeraireMismatch);
+    fee_vault::assert_canonical<N>(config, fee_vault);
     assert!(auction::all_winners_settled(state), ENotAllSettled);
 
     let settled = auction::settled_intent_count(state);
@@ -350,18 +389,10 @@ public fun close_batch<N, Stake>(
     let epoch = auction::current_epoch(state);
     let value_sum = auction::settled_score_value_sum(state);
 
-    let required_fee = math::mul_div_floor(value_sum, config.protocol_fee_bps(), math::bps_denom());
-    assert!(fee.value() >= required_fee, EFeeTooSmall);
-    // deposit only the required fee; refund any overpayment to the caller
-    let exact = fee.split(required_fee, ctx);
-    treasury::deposit_fee(treasury, exact, epoch);
-    if (fee.value() > 0) {
-        transfer::public_transfer(fee, ctx.sender());
-    } else {
-        fee.destroy_zero();
-    };
+    // VCG-style solver reward: performanceReward = cap(actual - benchmark, β × fees)
+    // Distributed proportionally to each solver by their verified score contribution.
+    distribute_solver_rewards<N>(state, config, fee_vault, epoch, actual_score, ctx);
 
-    distribute_rewards(state, config, treasury, actual_score, value_sum, ctx);
     release_winning_reservations(state, registry);
 
     events::emit_settlement_complete(
@@ -375,34 +406,47 @@ public fun close_batch<N, Stake>(
     auction::set_closed(state, config, clock);
 }
 
-fun distribute_rewards<N, Stake>(
+fun distribute_solver_rewards<N>(
     state: &AuctionState,
     config: &GlobalConfig,
-    treasury: &mut ProtocolTreasury<N, Stake>,
+    fee_vault: &mut FeeVault<N>,
+    epoch: u64,
     actual_score: u64,
-    value_sum: u64,
     ctx: &mut TxContext,
 ) {
-    if (actual_score == 0) return;
-    let by_share = math::mul_div_floor(actual_score, config.reward_share_bps(), math::bps_denom());
-    let by_cap = math::mul_div_floor(value_sum, config.reward_cap_bps(), math::bps_denom());
-    let avail = treasury::balance(treasury);
-    let mut total_reward = if (by_share < by_cap) by_share else by_cap;
-    if (total_reward > avail) total_reward = avail;
+    let reward_share_ppm = config.solver_reward_fee_share_ppm();
+    if (reward_share_ppm == 0) return;
+
+    let total_fee = auction::batch_total_fee_collected(state);
+    if (total_fee == 0) return;
+
+    let benchmark_score = auction::committed_benchmark_score(state);
+    let performance_excess =
+        if (actual_score > benchmark_score) actual_score - benchmark_score else 0;
+    if (performance_excess == 0) return;
+
+    let reward_cap = math::mul_div_floor(total_fee, reward_share_ppm, math::ppm_denom());
+    let total_reward = if (performance_excess < reward_cap) performance_excess else reward_cap;
     if (total_reward == 0) return;
 
     let solvers = auction::winning_solver_list(state);
-    let mut i = 0;
-    let n = solvers.length();
-    while (i < n) {
-        let s = solvers[i];
-        let s_score = auction::solver_actual_score(state, s);
-        let amount = math::mul_div_floor(total_reward, s_score, actual_score);
-        if (amount > 0) {
-            let reward = treasury::withdraw_reward(treasury, amount, ctx);
-            transfer::public_transfer(reward, s);
+    let ns = solvers.length();
+    if (ns == 0) return;
+
+    let fee_token = type_name::with_defining_ids<N>();
+    let mut si = 0;
+    while (si < ns) {
+        let solver = solvers[si];
+        let solver_score = auction::solver_actual_score(state, solver);
+        let solver_reward = math::mul_div_floor(total_reward, solver_score, actual_score);
+        if (solver_reward > 0 && fee_vault::balance(fee_vault) >= solver_reward) {
+            let reward_coin = fee_vault::pay_reward(fee_vault, solver_reward, ctx);
+            transfer::public_transfer(reward_coin, solver);
+            events::emit_solver_reward_paid(
+                epoch, solver, solver_reward, performance_excess, reward_cap, fee_token,
+            );
         };
-        i = i + 1;
+        si = si + 1;
     };
 }
 
@@ -438,7 +482,8 @@ fun release_unslashed_winning_reservations<Stake>(
 
 // === Fallback ===
 
-/// Fallback failed settlement, requeues valid unsettled intents, and slashes faulted reservations.
+/// Fallback failed settlement: requeues valid unsettled intents, slashes faulted reservations.
+/// Treasury is still required here for slashed stake deposits.
 #[allow(lint(self_transfer))]
 public fun trigger_fallback<N, Stake>(
     state: &mut AuctionState,
@@ -516,27 +561,31 @@ public fun trigger_fallback<N, Stake>(
     };
 }
 
-// === Test-only settle (inject normalized values, no DeepBook) ===
+// === Test-only settle (inject normalized values, no DeepBook, no fee split) ===
 
 #[test_only]
 public fun settle_intent_with_values_for_testing<Sell, Buy, Stake>(
     state: &mut AuctionState,
     registry: &mut SolverRegistry<Stake>,
+    config: &GlobalConfig,
+    fee_vault: &mut FeeVault<Buy>,
     receipt: SettlementReceipt<Sell, Buy>,
     payout: Coin<Buy>,
     score_value: u64,
     floor_value: u64,
+    ctx: &mut TxContext,
 ) {
-    let net = payout.value();
-    let (raw_surplus, floor) = verify_payout(&receipt, net);
-    finalize_settlement_normalized(
-        state,
-        registry,
-        receipt,
-        payout,
-        raw_surplus,
-        floor,
+    fee_vault::assert_canonical<Buy>(config, fee_vault);
+    let gross = payout.value();
+    let protected_min = max_u64(receipt.m_eff, receipt.floor);
+    assert!(gross >= receipt.m_eff, EBelowMinimum);
+    let (volume_fee, surplus_fee, total_fee) = compute_fees(config, &receipt.pair, gross, protected_min);
+    let net = gross - total_fee;
+    finalize_settlement(
+        state, registry, config, fee_vault, receipt, payout,
+        gross, protected_min, volume_fee, surplus_fee, total_fee, net,
         score_value,
         floor_value,
+        ctx,
     );
 }
