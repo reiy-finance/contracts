@@ -226,6 +226,16 @@ else
       exit 1
     fi
 
+    # v1 is numeraire-only: add_supported_pair on-chain requires Buy == numeraire (audit F-009-1).
+    # Fail fast here with a clear message instead of aborting mid-setup with a raw Move abort.
+    if [[ "$BUY" != "$USDC_TYPE" ]]; then
+      echo "ERROR: v1 numeraire-only — a supported pair's Buy token must be the numeraire." >&2
+      echo "       numeraire (USDC_TYPE): ${USDC_TYPE}" >&2
+      echo "       offending pair (Sell -> Buy): ${SELL} -> ${BUY}" >&2
+      echo "       Remove non-numeraire-Buy pairs from SUPPORTED_PAIRS (e.g. the reverse USDC->X)." >&2
+      exit 1
+    fi
+
     echo "  Adding pair: ${SELL} -> ${BUY}"
     run_ptb \
       --move-call "${REIY_PACKAGE_ID}::config::add_supported_pair<${SELL},${BUY}>" \
