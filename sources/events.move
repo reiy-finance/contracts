@@ -206,6 +206,16 @@ public struct SolverRewardPaidEvent has copy, drop {
     fee_token: TypeName,
 }
 
+/// Emitted when an earned solver reward could not be paid because the fee vault was short
+/// (e.g. fees withdrawn between settlement and close). Makes the omission observable on-chain.
+public struct SolverRewardSkippedEvent has copy, drop {
+    epoch: u64,
+    solver: address,
+    owed_amount: u64,
+    vault_balance: u64,
+    fee_token: TypeName,
+}
+
 // === Emit functions ===
 
 public(package) fun emit_intent_created(
@@ -489,6 +499,22 @@ public(package) fun emit_solver_reward_paid(
         reward_amount,
         performance_excess,
         reward_cap,
+        fee_token,
+    });
+}
+
+public(package) fun emit_solver_reward_skipped(
+    epoch: u64,
+    solver: address,
+    owed_amount: u64,
+    vault_balance: u64,
+    fee_token: TypeName,
+) {
+    event::emit(SolverRewardSkippedEvent {
+        epoch,
+        solver,
+        owed_amount,
+        vault_balance,
         fee_token,
     });
 }

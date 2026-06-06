@@ -42,9 +42,10 @@ public fun setup_all(scenario: &mut Scenario, admin: address) {
         let mut cfg = ts::take_shared<GlobalConfig>(scenario);
         let cap = ts::take_from_sender<AdminCap>(scenario);
         config::set_numeraire<USDC>(&mut cfg, &cap);
+        // v1 numeraire-only: every supported pair must buy the numeraire (USDC). A non-numeraire
+        // Buy pair such as TOKA/TOKB is now rejected by add_supported_pair (audit F-009-1 gate).
         config::add_supported_pair<TOKA, USDC>(&mut cfg, &cap);
         config::add_supported_pair<TOKB, USDC>(&mut cfg, &cap);
-        config::add_supported_pair<TOKA, TOKB>(&mut cfg, &cap);
         let registry_id = solver_registry::init_for_testing<SUI>(&cap, ts::ctx(scenario));
         let treasury_id = treasury::init_treasury<USDC, SUI>(&cfg, &cap, ts::ctx(scenario));
         config::set_solver_registry_id(&mut cfg, registry_id, &cap);

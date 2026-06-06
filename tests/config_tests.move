@@ -3,7 +3,7 @@ module reiy::config_tests;
 
 use sui::test_scenario::{Self as ts};
 use reiy::config::{Self, GlobalConfig, AdminCap};
-use reiy::test_helpers::{Self as h, USDC, TOKA};
+use reiy::test_helpers::{Self as h, USDC, TOKA, TOKB};
 
 const ADMIN: address = @0xAD;
 const BOB: address = @0xB0B;
@@ -23,14 +23,15 @@ fun test_defaults() {
         assert!(config::surplus_fee_ppm(&cfg) == 500_000, 3);
         assert!(config::surplus_fee_cap_ppm(&cfg) == 9_800, 4);
         assert!(config::max_total_fee_ppm(&cfg) == 10_000, 5);
-        assert!(config::solver_reward_fee_share_ppm(&cfg) == 0, 6);
+        assert!(config::solver_reward_fee_share_ppm(&cfg) == 500_000, 6); // β = 50% mainnet default
         // Other defaults unchanged
         assert!(config::max_slippage_tolerance_bps(&cfg) == 500, 7);
         assert!(config::grief_factor_bps(&cfg) == 15_000, 8);
         assert!(config::fallback_bounty_bps(&cfg) == 0, 9);
-        assert!(config::max_allocation_bids(&cfg) == 32, 10);
-        assert!(config::max_allocation_intents(&cfg) == 128, 11);
-        assert!(config::max_allocation_pairs(&cfg) == 16, 12);
+        assert!(config::max_allocations(&cfg) == 64, 10);
+        assert!(config::max_allocation_bids(&cfg) == 32, 11);
+        assert!(config::max_allocation_intents(&cfg) == 128, 12);
+        assert!(config::max_allocation_pairs(&cfg) == 16, 13);
         ts::return_shared(cfg);
     };
     ts::end(sc);
@@ -56,6 +57,8 @@ fun test_setters_and_allowlists() {
         assert!(config::max_slippage_tolerance_bps(&cfg) == 300, 3);
         config::set_fallback_bounty_bps(&mut cfg, 500, &cap);
         assert!(config::fallback_bounty_bps(&cfg) == 500, 4);
+        config::set_max_allocations(&mut cfg, 16, &cap);
+        assert!(config::max_allocations(&cfg) == 16, 10);
         config::set_max_allocation_bids(&mut cfg, 8, &cap);
         assert!(config::max_allocation_bids(&cfg) == 8, 5);
         config::set_max_allocation_intents(&mut cfg, 16, &cap);
@@ -69,6 +72,24 @@ fun test_setters_and_allowlists() {
         assert!(config::is_pair_supported(&cfg, &reiy::types::pair_key<TOKA, USDC>()), 8);
         config::remove_supported_pair<TOKA, USDC>(&mut cfg, &cap);
         assert!(!config::is_pair_supported(&cfg, &reiy::types::pair_key<TOKA, USDC>()), 9);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
+    ts::end(sc);
+}
+
+/// F-005-3: a Custom fee tier above MAX_VOLUME_FEE_PPM must abort (parity with global setters),
+/// otherwise volume_fee could exceed gross and brick the pair via u64 underflow.
+#[test]
+#[expected_failure(abort_code = reiy::config::EInvalidParam)]
+fun test_custom_fee_tier_over_max_aborts() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        config::set_pair_fee_tier<TOKA, USDC>(&mut cfg, config::fee_tier_custom(10_001), &cap);
         ts::return_to_sender(&mut sc, cap);
         ts::return_shared(cfg);
     };
@@ -118,6 +139,25 @@ fun test_grief_factor_below_one_aborts() {
         let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
         let cap = ts::take_from_sender<AdminCap>(&mut sc);
         config::set_grief_factor(&mut cfg, 9_999, &cap); // < 1.0x
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
+    ts::end(sc);
+}
+
+/// F-009-1 (v1 numeraire-only gate): a supported pair whose Buy token is not the numeraire must be
+/// rejected at the allowlist, so no non-numeraire-Buy intent can ever exist and the VCG reward cap
+/// stays denominated in the numeraire. Numeraire is USDC (set in setup_all); TOKA/TOKB buys TOKB.
+#[test]
+#[expected_failure(abort_code = reiy::config::ENonNumeraireBuy)]
+fun test_non_numeraire_buy_pair_rejected() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        config::add_supported_pair<TOKA, TOKB>(&mut cfg, &cap); // Buy = TOKB != USDC
         ts::return_to_sender(&mut sc, cap);
         ts::return_shared(cfg);
     };
@@ -190,6 +230,9 @@ fun test_pair_fee_tier_correlated() {
         assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 30, 1);
         config::set_pair_fee_tier<TOKA, USDC>(&mut cfg, config::fee_tier_disabled(), &cap);
         assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 0, 2);
+        // Custom tier within the volume-fee ceiling is accepted
+        config::set_pair_fee_tier<TOKA, USDC>(&mut cfg, config::fee_tier_custom(5_000), &cap);
+        assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 5_000, 3);
         ts::return_to_sender(&mut sc, cap);
         ts::return_shared(cfg);
     };

@@ -119,6 +119,17 @@ public struct BenchmarkEntry has drop, store {
     stake_reserved: u64,
 }
 
+/// Compact benchmark summary retained past winner selection for the close-path VCG reference.
+/// Holds only the fields `reference_score_excluding` consumes (auctioneer + total_score), so the
+/// heavy `pair_benchmarks` (carrying per-intent `intents`/`payouts` vectors) can be dropped once a
+/// winner is committed without losing the data the reward computation needs at close.
+/// * `auctioneer`  - Address that submitted the winning per-pair benchmark
+/// * `total_score` - Sum of constituent bid scores for that pair
+public struct BenchmarkRef has copy, drop, store {
+    auctioneer: address,
+    total_score: u64,
+}
+
 /// A proposed set of Bids competing to be the winning allocation.
 /// * `auctioneer`  - Address that submitted this allocation
 /// * `bid_seqs`    - Indices into `AuctionState.bids` for the constituent bids
@@ -167,11 +178,11 @@ public struct UCPRef has copy, drop, store {
 /// * `settled_score_value_sum`   - Accumulated normalized floor value of settled intents (for fee calc)
 /// * `pair_ucp_refs`           - EPSR reference ratio per directed pair set by first settled intent
 /// * `intent_settled`            - IDs of intents already settled; prevents double-consume
-/// * `solver_actual_score`       - Verified score contribution per solver; used for reward split
+/// * `solver_actual_score`       - Verified score contribution per solver; used for VCG reward
 /// * `winner_reservation_of`     - Maps each winning intent to its bid/benchmark reservation
 /// * `winning_reservations`      - Reservations retained for settlement close/fallback
-/// * `batch_total_fee_collected` - Cumulative protocol fees (in Buy/N) collected during settlement
-/// * `committed_benchmark_score` - Reference score (sum of pair benchmark scores); used in VCG reward
+/// * `solver_fee_collected`      - Per-solver protocol fees (in Buy/N); bounds each solver's VCG reward
+/// * `committed_benchmark_refs`  - Compact per-pair benchmark summary kept past selection for VCG close
 public struct AuctionState has key {
     id: UID,
     current_epoch: u64,
@@ -202,8 +213,8 @@ public struct AuctionState has key {
     solver_actual_score: VecMap<address, u64>,
     winner_reservation_of: VecMap<ID, StakeReservationKey>,
     winning_reservations: VecSet<StakeReservationKey>,
-    batch_total_fee_collected: u64,
-    committed_benchmark_score: u64,
+    solver_fee_collected: VecMap<address, u64>,
+    committed_benchmark_refs: VecMap<PairKey, BenchmarkRef>,
 }
 
 fun init(ctx: &mut TxContext) {
@@ -241,8 +252,8 @@ fun new_state(ctx: &mut TxContext): AuctionState {
         solver_actual_score: vec_map::empty(),
         winner_reservation_of: vec_map::empty(),
         winning_reservations: vec_set::empty(),
-        batch_total_fee_collected: 0,
-        committed_benchmark_score: 0,
+        solver_fee_collected: vec_map::empty(),
+        committed_benchmark_refs: vec_map::empty(),
     }
 }
 
@@ -469,8 +480,8 @@ fun start_new_epoch(state: &mut AuctionState, config: &GlobalConfig, now: u64) {
     state.solver_actual_score = vec_map::empty();
     state.winner_reservation_of = vec_map::empty();
     state.winning_reservations = vec_set::empty();
-    state.batch_total_fee_collected = 0;
-    state.committed_benchmark_score = 0;
+    state.solver_fee_collected = vec_map::empty();
+    state.committed_benchmark_refs = vec_map::empty();
     state.batch = vec_set::empty();
     state.intent_meta = vec_map::empty();
     let reqs = state.requeued.into_keys();
@@ -733,6 +744,8 @@ public fun submit_allocation<Stake>(
     config.assert_solver_registry_id(solver_registry::id(registry));
     assert!(bid_seqs.length() > 0, EEmptyIntents);
     assert!(bid_seqs.length() <= config.max_allocation_bids(), EBatchLimitExceeded);
+    // Bound total allocation count: reference-score computation at close is O(solvers × allocations).
+    assert!(state.allocations.length() < config.max_allocations(), EBatchLimitExceeded);
     let auctioneer = ctx.sender();
     assert!(solver_registry::is_active(registry, config, auctioneer), ESolverNotActive);
 
@@ -854,6 +867,17 @@ fun run_selection<Stake>(
         return
     };
 
+    // A winner is now committed. The Bid/Selection inputs are dead from here on: their stake
+    // reservations were released above and nothing in Settlement or Close reads them again. The
+    // close-path VCG reference needs only (auctioneer, total_score) per pair, so capture that into
+    // the compact `committed_benchmark_refs` and then drop all three heavy collections. This keeps
+    // the shared `AuctionState` small for every `settle_intent` during the whole settlement phase
+    // and rebates their storage immediately rather than at next epoch rollover.
+    capture_benchmark_refs(state);
+    state.pair_benchmarks = vec_map::empty();
+    state.bids = vector[];
+    state.allocations = vector[];
+
     state.winner_selected = true;
     state.phase = AuctionPhase::Settlement;
     state.settlement_deadline_ms = now + config.settlement_deadline_ms();
@@ -912,23 +936,9 @@ fun commit_winner_from_allocation(
         commit_bid_intents(state, solver, reservation_key, &intents, &fills, &payouts, &m_effs, &pairs);
         i = i + 1;
     };
-    // Reference score = sum of benchmark scores for committed pairs (VCG counterfactual)
-    let committed_pairs = state.committed_k_by_pair.keys();
-    let mut bm_score = 0u64;
-    let mut pi = 0;
-    let np = committed_pairs.length();
-    while (pi < np) {
-        let p = committed_pairs[pi];
-        if (state.pair_benchmarks.contains(&p)) {
-            bm_score = bm_score + state.pair_benchmarks.get(&p).total_score;
-        };
-        pi = pi + 1;
-    };
-    state.committed_benchmark_score = bm_score;
 }
 
 fun commit_winner_from_benchmarks(state: &mut AuctionState, _config: &GlobalConfig) {
-    state.committed_benchmark_score = 0; // benchmark IS the winner; no competing reference
     let pairs = state.pair_benchmarks.keys();
     let mut total = 0u64;
     let mut i = 0;
@@ -1059,6 +1069,26 @@ fun release_all_open_reservations<Stake>(
     release_all_benchmark_reservations(state, registry);
 }
 
+/// Snapshot the close-path-relevant part of every per-pair benchmark (auctioneer + total_score)
+/// into the compact `committed_benchmark_refs` so the heavy `pair_benchmarks` can be dropped after
+/// winner selection. Called once at selection; `committed_benchmark_refs` is keyed by pair like
+/// `pair_benchmarks` and is read only by `reference_score_excluding` at close.
+fun capture_benchmark_refs(state: &mut AuctionState) {
+    let pairs = state.pair_benchmarks.keys();
+    let n = pairs.length();
+    let mut i = 0;
+    while (i < n) {
+        let p = pairs[i];
+        let entry = state.pair_benchmarks.get(&p);
+        let auctioneer = entry.auctioneer;
+        let total_score = entry.total_score;
+        state
+            .committed_benchmark_refs
+            .insert(p, BenchmarkRef { auctioneer, total_score });
+        i = i + 1;
+    };
+}
+
 // === Package accessors ===
 
 public(package) fun assert_settlement_phase(state: &AuctionState) {
@@ -1163,16 +1193,49 @@ public(package) fun winning_solver_list(state: &AuctionState): vector<address> {
     state.solver_actual_score.keys()
 }
 
-public(package) fun batch_total_fee_collected(state: &AuctionState): u64 {
-    state.batch_total_fee_collected
+public(package) fun solver_fee_of(state: &AuctionState, solver: address): u64 {
+    if (state.solver_fee_collected.contains(&solver)) *state.solver_fee_collected.get(&solver) else 0
 }
 
-public(package) fun committed_benchmark_score(state: &AuctionState): u64 {
-    state.committed_benchmark_score
+public(package) fun accumulate_solver_fee(state: &mut AuctionState, solver: address, amount: u64) {
+    if (state.solver_fee_collected.contains(&solver)) {
+        let f = state.solver_fee_collected.get_mut(&solver);
+        *f = *f + amount;
+    } else {
+        state.solver_fee_collected.insert(solver, amount);
+    };
 }
 
-public(package) fun accumulate_batch_fee(state: &mut AuctionState, amount: u64) {
-    state.batch_total_fee_collected = state.batch_total_fee_collected + amount;
+/// VCG counterfactual reference score for `solver`: the score the auction would still reach
+/// WITHOUT this solver — anchored to the per-pair **benchmark** over committed pairs whose benchmark
+/// auctioneer != `solver`. The solver's marginal contribution is `actual_total_score - reference`.
+///
+/// Benchmark-only by design (trust-minimized). Competing losing allocations are deliberately NOT
+/// counted: a losing allocation is an unbacked claim (its bid/allocation reservations are released,
+/// not slashed, at selection), so counting it would let a rival inflate the reference with an
+/// undeliverable "paper" allocation and suppress the winner's reward (audit F-005-1). The benchmark,
+/// by contrast, is load-bearing — it sets the per-intent floor (`allocation_is_valid`) and, if the
+/// winning allocation fails it, becomes the winner whose proposer must deliver or be slashed — so it
+/// cannot be inflated without on-chain consequence. This also removes any allocation iteration from
+/// the close path: reference is O(pairs) per solver.
+///
+/// Conservative attribution: the benchmark term is keyed by benchmark auctioneer. A solver who both
+/// provided a benchmark and won has that benchmark excluded from its own reference (reward slightly
+/// under-estimated, never over) — the safe direction for the vault, reinforced by the `β × fee_i` cap.
+public(package) fun reference_score_excluding(state: &AuctionState, solver: address): u64 {
+    let committed = state.committed_k_by_pair.keys();
+    let np = committed.length();
+    let mut reference = 0u64;
+    let mut pi = 0;
+    while (pi < np) {
+        let p = committed[pi];
+        if (state.committed_benchmark_refs.contains(&p)) {
+            let entry = state.committed_benchmark_refs.get(&p);
+            if (entry.auctioneer != solver) reference = reference + entry.total_score;
+        };
+        pi = pi + 1;
+    };
+    reference
 }
 
 public(package) fun requeue_intent(

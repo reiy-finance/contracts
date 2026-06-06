@@ -48,8 +48,8 @@ const DEFAULT_CORRELATED_VOLUME_FEE_PPM: u64 = 30;      // 0.3 bps
 const DEFAULT_SURPLUS_FEE_PPM: u64 = 500_000;           // 50%
 const DEFAULT_SURPLUS_FEE_CAP_PPM: u64 = 9_800;         // 0.98% of gross
 const DEFAULT_MAX_TOTAL_FEE_PPM: u64 = 10_000;          // 1.00%
-const DEFAULT_SOLVER_REWARD_SHARE_PPM: u64 = 0;         // no on-chain reward in MVP
-const DEFAULT_MAX_UCP_ROUNDING_LOSS: u64 = 1;
+const DEFAULT_SOLVER_REWARD_SHARE_PPM: u64 = 500_000;   // β = 50% of protocol fee (CoW mainnet default)
+const DEFAULT_MAX_ALLOCATIONS: u64 = 64;
 
 #[error]
 const ENotAdmin: vector<u8> = b"caller lacks ROLE_CONFIG_ADMIN";
@@ -67,6 +67,10 @@ const ECanonicalObjectAlreadySet: vector<u8> = b"canonical object already config
 const EWrongCanonicalObject: vector<u8> = b"wrong canonical object";
 #[error]
 const EFeeVaultNotRegistered: vector<u8> = b"fee vault not registered for this token";
+#[error]
+const ENonNumeraireBuy: vector<u8> = b"v1 numeraire-only: a supported pair's Buy token must be the numeraire";
+#[error]
+const ENumeraireLocked: vector<u8> = b"numeraire cannot be changed once pairs are allowlisted";
 
 /// Owned capability gating all mutations.
 public struct AdminCap has key, store { id: UID }
@@ -99,7 +103,6 @@ public struct GlobalConfig has key {
     surplus_fee_cap_ppm: u64,
     max_total_fee_ppm: u64,
     solver_reward_fee_share_ppm: u64,
-    max_ucp_rounding_loss: u64,
     // Stake / grief
     min_solver_stake: u64,
     grief_factor_bps: u64,
@@ -107,6 +110,7 @@ public struct GlobalConfig has key {
     required_benchmark_stake: u64,
     fallback_bounty_bps: u64,
     // Limits
+    max_allocations: u64,
     max_allocation_bids: u64,
     max_allocation_intents: u64,
     max_allocation_pairs: u64,
@@ -145,12 +149,12 @@ fun init(ctx: &mut TxContext) {
         surplus_fee_cap_ppm: DEFAULT_SURPLUS_FEE_CAP_PPM,
         max_total_fee_ppm: DEFAULT_MAX_TOTAL_FEE_PPM,
         solver_reward_fee_share_ppm: DEFAULT_SOLVER_REWARD_SHARE_PPM,
-        max_ucp_rounding_loss: DEFAULT_MAX_UCP_ROUNDING_LOSS,
         min_solver_stake: DEFAULT_MIN_SOLVER_STAKE,
         grief_factor_bps: DEFAULT_GRIEF_FACTOR_BPS,
         required_allocation_stake: DEFAULT_ALLOCATION_STAKE,
         required_benchmark_stake: DEFAULT_BENCHMARK_STAKE,
         fallback_bounty_bps: DEFAULT_FALLBACK_BOUNTY_BPS,
+        max_allocations: DEFAULT_MAX_ALLOCATIONS,
         max_allocation_bids: DEFAULT_MAX_ALLOCATION_BIDS,
         max_allocation_intents: DEFAULT_MAX_ALLOCATION_INTENTS,
         max_allocation_pairs: DEFAULT_MAX_ALLOCATION_PAIRS,
@@ -264,10 +268,6 @@ public fun set_solver_reward_share_ppm(c: &mut GlobalConfig, v: u64, _: &AdminCa
     set(&mut c.solver_reward_fee_share_ppm, v, b"solver_reward_fee_share_ppm");
 }
 
-public fun set_max_ucp_rounding_loss(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    set(&mut c.max_ucp_rounding_loss, v, b"max_ucp_rounding_loss");
-}
-
 public fun set_min_solver_stake(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
     set(&mut c.min_solver_stake, v, b"min_solver_stake");
@@ -289,6 +289,11 @@ public fun set_required_benchmark_stake(c: &mut GlobalConfig, v: u64, _: &AdminC
 public fun set_fallback_bounty_bps(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v <= MAX_FALLBACK_BOUNTY_BPS, EInvalidParam);
     set(&mut c.fallback_bounty_bps, v, b"fallback_bounty_bps");
+}
+
+public fun set_max_allocations(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
+    assert!(v > 0, EInvalidParam);
+    set(&mut c.max_allocations, v, b"max_allocations");
 }
 
 public fun set_max_allocation_bids(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
@@ -327,6 +332,13 @@ public fun set_pair_fee_tier<Sell, Buy>(
     tier: FeeTier,
     _: &AdminCap,
 ) {
+    // A Custom tier must respect the same volume-fee ceiling the global setters enforce;
+    // otherwise a value above 1e6 ppm would underflow `gross - volume_fee` and brick the pair.
+    let max_total = c.max_total_fee_ppm;
+    match (tier) {
+        FeeTier::Custom(ppm) => assert!(ppm <= MAX_VOLUME_FEE_PPM && ppm <= max_total, EInvalidParam),
+        _ => (),
+    };
     let key = types::pair_key<Sell, Buy>();
     if (c.pair_fee_tiers.contains(&key)) {
         *c.pair_fee_tiers.get_mut(&key) = tier;
@@ -375,6 +387,15 @@ public fun assert_fee_vault_id<T>(c: &GlobalConfig, id: ID) {
 // === Allowlists ===
 
 public fun add_supported_pair<Sell, Buy>(c: &mut GlobalConfig, _: &AdminCap) {
+    // v1 (numeraire-only): every supported pair must BUY the numeraire. This is the single
+    // invariant that keeps all protocol fees denominated in the numeraire, so the VCG reward cap
+    // (β × fee_i) is in the same unit as the reward it bounds and is paid from the matching
+    // `FeeVault<numeraire>`. It closes the cross-token reward hole (audit F-009-1) at the allowlist
+    // boundary: with no non-numeraire-Buy pair, no such intent can be created, so the non-numeraire
+    // `settle_intent` normalization path is unreachable and `accumulate_solver_fee` only ever sees
+    // numeraire fees. Multi-token Buy (with on-chain fee→numeraire conversion) is a v2 item.
+    // `numeraire_type` aborts if the numeraire is unset, so the numeraire must be configured first.
+    assert!(type_name::with_defining_ids<Buy>() == numeraire_type(c), ENonNumeraireBuy);
     let key = types::pair_key<Sell, Buy>();
     if (!c.supported_pairs.contains(&key)) c.supported_pairs.insert(key);
 }
@@ -393,6 +414,11 @@ public fun assert_pair_supported(c: &GlobalConfig, key: &PairKey) {
 }
 
 public fun set_numeraire<N>(c: &mut GlobalConfig, _: &AdminCap) {
+    // The numeraire underpins all fee/reward denomination and the v1 numeraire-only pair invariant
+    // (`add_supported_pair`). Forbid changing it once any pair is allowlisted; otherwise existing
+    // pairs whose Buy was the old numeraire would silently become non-numeraire-Buy and reopen the
+    // cross-token reward hole (F-009-1). Set the numeraire first, then allowlist pairs.
+    assert!(c.supported_pairs.length() == 0, ENumeraireLocked);
     c.numeraire_type = option::some(type_name::with_defining_ids<N>());
 }
 
@@ -472,8 +498,6 @@ public fun max_total_fee_ppm(c: &GlobalConfig): u64 { c.max_total_fee_ppm }
 
 public fun solver_reward_fee_share_ppm(c: &GlobalConfig): u64 { c.solver_reward_fee_share_ppm }
 
-public fun max_ucp_rounding_loss(c: &GlobalConfig): u64 { c.max_ucp_rounding_loss }
-
 public fun min_solver_stake(c: &GlobalConfig): u64 { c.min_solver_stake }
 
 public fun grief_factor_bps(c: &GlobalConfig): u64 { c.grief_factor_bps }
@@ -483,6 +507,8 @@ public fun required_allocation_stake(c: &GlobalConfig): u64 { c.required_allocat
 public fun required_benchmark_stake(c: &GlobalConfig): u64 { c.required_benchmark_stake }
 
 public fun fallback_bounty_bps(c: &GlobalConfig): u64 { c.fallback_bounty_bps }
+
+public fun max_allocations(c: &GlobalConfig): u64 { c.max_allocations }
 
 public fun max_allocation_bids(c: &GlobalConfig): u64 { c.max_allocation_bids }
 

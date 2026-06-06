@@ -18,6 +18,7 @@ use reiy::test_helpers::{Self as h, USDC, TOKA};
 const ADMIN: address = @0xAD;
 const SOLVER: address = @0x5;
 const AUC: address = @0xA0;
+const SOLVER2: address = @0xB2;
 const U1: address = @0x1;
 
 const MID: u64 = 2_000_000_000; // 2.0x TOKA->USDC
@@ -178,13 +179,21 @@ fun test_full_lifecycle_happy() {
         h::burn(c2);
     };
 
-    // Fee vault holds 40 + 20 = 60 USDC
+    // Fee vault collected 40 + 20 = 60 USDC; at close, VCG reward of 30 (β=50% × 60) paid to
+    // the sole winning SOLVER, leaving balance 30. total_collected stays 60 (cumulative).
     ts::next_tx(&mut sc, ADMIN);
     {
         let vault = ts::take_shared<FeeVault<USDC>>(&mut sc);
-        assert!(fee_vault::balance(&vault) == 60, 400);
+        assert!(fee_vault::balance(&vault) == 30, 400);
         assert!(fee_vault::total_collected(&vault) == 60, 401);
         ts::return_shared(vault);
+    };
+    // Winning SOLVER received the 30 USDC VCG reward
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let reward = ts::take_from_sender<sui::coin::Coin<USDC>>(&mut sc);
+        assert!(reward.value() == 30, 402);
+        h::burn(reward);
     };
 
     clock.destroy_for_testing();
@@ -268,6 +277,78 @@ fun drive_to_settlement(sc: &mut Scenario, clock: &mut Clock): (ID, ID) {
     ts::next_tx(sc, ADMIN);
     advance(sc, clock);
     (id1, id2)
+}
+
+/// DoS bound: allocation count is capped by config.max_allocations. The reference-score
+/// computation at close is O(solvers × allocations), so an unbounded allocation count would
+/// let an attacker make close_batch arbitrarily expensive. Submitting past the cap aborts.
+#[test]
+#[expected_failure(abort_code = reiy::auction::EBatchLimitExceeded)]
+fun test_max_allocations_cap_aborts() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    // Tighten the cap to 1 allocation
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        config::set_max_allocations(&mut cfg, 1, &cap);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    clock.set_for_testing(1_000);
+    ts::next_tx(&mut sc, U1);
+    let id1;
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        id1 = auction::submit_intent_with_price_for_testing<TOKA, USDC>(
+            &mut state, &cfg, h::mint<TOKA>(1_000, ts::ctx(&mut sc)),
+            1_900, MID, 500, true, false, DEADLINE, &clock, ts::ctx(&mut sc),
+        );
+        ts::return_shared(cfg);
+        ts::return_shared(state);
+    };
+    register_solver(&mut sc, SOLVER);
+    register_solver(&mut sc, AUC);
+    ts::next_tx(&mut sc, ADMIN);
+    advance(&mut sc, &clock);
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
+            vector[id1], vector[1_000], vector[2_090], false, 190, ts::ctx(&mut sc));
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
+            vector[id1], vector[1_000], vector[4_180], false, 2_090, ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+    clock.set_for_testing(7_000);
+    ts::next_tx(&mut sc, ADMIN);
+    advance(&mut sc, &clock);
+    ts::next_tx(&mut sc, AUC);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_pair_benchmark(&mut state, &mut registry, &cfg, vector[0], ts::ctx(&mut sc));
+        // First allocation OK (count 0 < cap 1)
+        auction::submit_allocation(&mut state, &mut registry, &cfg, vector[1], 2_090, ts::ctx(&mut sc));
+        // Second allocation exceeds cap → EBatchLimitExceeded
+        auction::submit_allocation(&mut state, &mut registry, &cfg, vector[1], 2_090, ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+    clock.destroy_for_testing();
+    ts::end(sc);
 }
 
 // === MVP Fee Tests ===
@@ -613,11 +694,20 @@ fun test_solver_vcg_reward_paid_from_fee_vault() {
     ts::end(sc);
 }
 
-/// When solver_reward_share_ppm = 0 (default MVP), no reward is paid.
+/// Governance can disable rewards by setting solver_reward_share_ppm = 0 → no reward paid.
 #[test]
 fun test_no_solver_reward_when_share_is_zero() {
     let mut sc = ts::begin(ADMIN);
     h::setup_all(&mut sc, ADMIN);
+    // Disable rewards (override the 50% mainnet default)
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        config::set_solver_reward_share_ppm(&mut cfg, 0, &cap);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
     ts::next_tx(&mut sc, ADMIN);
     let mut clock = h::new_clock(ts::ctx(&mut sc));
     let (id1, id2) = drive_to_settlement(&mut sc, &mut clock);
@@ -629,6 +719,142 @@ fun test_no_solver_reward_when_share_is_zero() {
     {
         let vault = ts::take_shared<FeeVault<USDC>>(&mut sc);
         assert!(fee_vault::balance(&vault) == 60, 0); // no reward paid
+        ts::return_shared(vault);
+    };
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+/// F-005-1 regression: a competing "paper" allocation must NOT suppress the winner's reward.
+/// The reference is benchmark-only, so undeliverable losing allocations are ignored.
+/// Single intent (sell 1M, min 1.9M):
+///   - SOLVER  bid seq1: payout 2_000_000, score 100_000  → wins
+///   - SOLVER2 bid seq2: payout 1_995_000, score  95_000  → competing allocation (the "paper" bid)
+/// SOLVER settles at gross 2_000_000: total_fee = 20_000, cap = β×fee = 10_000.
+///   referenceScore(SOLVER) = benchmark 0 (competing allocation 95_000 is IGNORED)
+///   marginal = actual_score 100_000 − 0 = 100_000   (> cap → cap binds)
+///   reward   = min(100_000, 10_000) = 10_000
+/// If the reference still counted the competing allocation (pre-fix), reward would be the
+/// suppressed 5_000 — so 10_000 verifies the griefing vector is closed.
+#[test]
+fun test_competing_allocation_does_not_suppress_reward() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    clock.set_for_testing(1_000);
+
+    ts::next_tx(&mut sc, U1);
+    let id1;
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        id1 = auction::submit_intent_with_price_for_testing<TOKA, USDC>(
+            &mut state, &cfg, h::mint<TOKA>(1_000_000, ts::ctx(&mut sc)),
+            1_900_000, MID, 500, true, false, DEADLINE, &clock, ts::ctx(&mut sc),
+        );
+        ts::return_shared(cfg);
+        ts::return_shared(state);
+    };
+    register_solver(&mut sc, SOLVER);
+    register_solver(&mut sc, AUC);
+    register_solver(&mut sc, SOLVER2);
+    ts::next_tx(&mut sc, ADMIN);
+    advance(&mut sc, &clock);
+
+    // SOLVER: seq0 (benchmark bid, payout=floor, score 0) + seq1 (winning, score 100_000)
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
+            vector[id1], vector[1_000_000], vector[1_900_000], false, 0, ts::ctx(&mut sc));
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
+            vector[id1], vector[1_000_000], vector[2_000_000], false, 100_000, ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+    // SOLVER2: seq2 (alternative, payout 1_995_000, score 95_000)
+    ts::next_tx(&mut sc, SOLVER2);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_bid(
+            &mut state, &mut registry, &cfg,
+            vector[id1], vector[1_000_000], vector[1_995_000], false, 95_000, ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+
+    clock.set_for_testing(7_000);
+    ts::next_tx(&mut sc, ADMIN);
+    advance(&mut sc, &clock);
+
+    // AUC: benchmark from seq0 + allocation [seq1]. SOLVER2: alternative allocation [seq2].
+    ts::next_tx(&mut sc, AUC);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_pair_benchmark(&mut state, &mut registry, &cfg, vector[0], ts::ctx(&mut sc));
+        auction::submit_allocation(&mut state, &mut registry, &cfg, vector[1], 100_000, ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+    ts::next_tx(&mut sc, SOLVER2);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        auction::submit_allocation(&mut state, &mut registry, &cfg, vector[2], 95_000, ts::ctx(&mut sc));
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+
+    clock.set_for_testing(13_000);
+    ts::next_tx(&mut sc, ADMIN);
+    advance(&mut sc, &clock);
+
+    // SOLVER settles winning intent at gross 2_000_000
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let mut state = ts::take_shared<AuctionState>(&mut sc);
+        let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+        let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let mut vault = ts::take_shared<FeeVault<USDC>>(&mut sc);
+        let intent = ts::take_shared_by_id<Intent<TOKA, USDC>>(&mut sc, id1);
+        let (sell_coin, receipt) = settlement::take_intent_full(&mut state, intent, &clock, ts::ctx(&mut sc));
+        settlement::settle_intent_numeraire(
+            &mut state, &mut registry, &cfg, &mut vault, receipt,
+            h::mint<USDC>(2_000_000, ts::ctx(&mut sc)), ts::ctx(&mut sc),
+        );
+        h::burn(sell_coin);
+        ts::return_shared(vault);
+        ts::return_shared(cfg);
+        ts::return_shared(registry);
+        ts::return_shared(state);
+    };
+    close_one(&mut sc, &clock);
+
+    // reward = 10_000 (cap binds; competing allocation ignored → not suppressed to 5_000)
+    ts::next_tx(&mut sc, SOLVER);
+    {
+        let reward = ts::take_from_sender<sui::coin::Coin<USDC>>(&mut sc);
+        assert!(reward.value() == 10_000, 0);
+        h::burn(reward);
+    };
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let vault = ts::take_shared<FeeVault<USDC>>(&mut sc);
+        assert!(fee_vault::balance(&vault) == 10_000, 1); // 20_000 fee − 10_000 reward
         ts::return_shared(vault);
     };
     clock.destroy_for_testing();
