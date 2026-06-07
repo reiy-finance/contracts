@@ -1,0 +1,24 @@
+{
+  "name": "reiy-benchmark",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "doctor": "bun run src/doctor.ts",
+    "register-solver": "bun run src/register-solver.ts",
+    "advance": "bun run src/advance.ts",
+    "reset": "bun run src/reset.ts",
+    "intents": "bun run src/run-intents.ts",
+    "bids": "bun run src/run-bids.ts",
+    "e2e": "bun run src/run-e2e.ts",
+    "figures": "python3 scripts/plot.py",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mysten/sui": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}

@@ -87,47 +87,64 @@ public enum FeeTier has copy, drop, store {
     Disabled,
 }
 
-/// Shared protocol configuration and canonical object bindings.
-public struct GlobalConfig has key {
-    id: UID,
-    version: u64,
-    collection_duration_ms: u64,
-    bid_duration_ms: u64,
-    selection_duration_ms: u64,
-    settlement_deadline_ms: u64,
-    min_batch_collect_ms: u64,
-    // PPM fee parameters (parts-per-million, denominator 1_000_000)
+public struct FeeConfig has store {
     standard_volume_fee_ppm: u64,
     correlated_volume_fee_ppm: u64,
     surplus_fee_ppm: u64,
     surplus_fee_cap_ppm: u64,
     max_total_fee_ppm: u64,
     solver_reward_fee_share_ppm: u64,
-    // Stake / grief
+}
+
+public struct AuctionConfig has store {
+    collection_duration_ms: u64,
+    bid_duration_ms: u64,
+    selection_duration_ms: u64,
+    settlement_deadline_ms: u64,
+    min_batch_collect_ms: u64,
+    max_allocations: u64,
+    max_allocation_bids: u64,
+    max_allocation_intents: u64,
+    max_allocation_pairs: u64,
+}
+
+public struct SolverConfig has store {
     min_solver_stake: u64,
     grief_factor_bps: u64,
     required_allocation_stake: u64,
     required_benchmark_stake: u64,
     fallback_bounty_bps: u64,
-    // Limits
-    max_allocations: u64,
-    max_allocation_bids: u64,
-    max_allocation_intents: u64,
-    max_allocation_pairs: u64,
+}
+
+public struct PriceConfig has store {
     max_slippage_tolerance_bps: u64,
     min_sbbo_mid_price: u64,
     price_oracle_max_age_ms: u64,
-    // Canonical object IDs
+}
+
+public struct CanonicalConfig has store {
     solver_registry_id: Option<ID>,
     protocol_treasury_id: Option<ID>,
-    // Allowlists
+}
+
+public struct MarketConfig has store {
     supported_pairs: VecSet<PairKey>,
     numeraire_pools: VecMap<TypeName, ID>,
     numeraire_type: Option<TypeName>,
-    // Per-pair fee tiers (absent = Standard)
     pair_fee_tiers: VecMap<PairKey, FeeTier>,
-    // Fee vaults: TypeName -> vault ID
     fee_vaults: VecMap<TypeName, ID>,
+}
+
+/// Shared protocol configuration and canonical object bindings.
+public struct GlobalConfig has key {
+    id: UID,
+    version: u64,
+    auction: AuctionConfig,
+    fees: FeeConfig,
+    solver: SolverConfig,
+    price: PriceConfig,
+    canonical: CanonicalConfig,
+    market: MarketConfig,
     acl: ACL,
 }
 
@@ -138,36 +155,48 @@ fun init(ctx: &mut TxContext) {
     transfer::share_object(GlobalConfig {
         id: object::new(ctx),
         version: 5,
-        collection_duration_ms: DEFAULT_COLLECTION_MS,
-        bid_duration_ms: DEFAULT_BID_MS,
-        selection_duration_ms: DEFAULT_SELECTION_MS,
-        settlement_deadline_ms: DEFAULT_SETTLEMENT_DEADLINE_MS,
-        min_batch_collect_ms: DEFAULT_MIN_BATCH_COLLECT_MS,
-        standard_volume_fee_ppm: DEFAULT_STANDARD_VOLUME_FEE_PPM,
-        correlated_volume_fee_ppm: DEFAULT_CORRELATED_VOLUME_FEE_PPM,
-        surplus_fee_ppm: DEFAULT_SURPLUS_FEE_PPM,
-        surplus_fee_cap_ppm: DEFAULT_SURPLUS_FEE_CAP_PPM,
-        max_total_fee_ppm: DEFAULT_MAX_TOTAL_FEE_PPM,
-        solver_reward_fee_share_ppm: DEFAULT_SOLVER_REWARD_SHARE_PPM,
-        min_solver_stake: DEFAULT_MIN_SOLVER_STAKE,
-        grief_factor_bps: DEFAULT_GRIEF_FACTOR_BPS,
-        required_allocation_stake: DEFAULT_ALLOCATION_STAKE,
-        required_benchmark_stake: DEFAULT_BENCHMARK_STAKE,
-        fallback_bounty_bps: DEFAULT_FALLBACK_BOUNTY_BPS,
-        max_allocations: DEFAULT_MAX_ALLOCATIONS,
-        max_allocation_bids: DEFAULT_MAX_ALLOCATION_BIDS,
-        max_allocation_intents: DEFAULT_MAX_ALLOCATION_INTENTS,
-        max_allocation_pairs: DEFAULT_MAX_ALLOCATION_PAIRS,
-        max_slippage_tolerance_bps: DEFAULT_MAX_SLIPPAGE_BPS,
-        min_sbbo_mid_price: DEFAULT_MIN_SBBO_MID_PRICE,
-        price_oracle_max_age_ms: DEFAULT_PRICE_ORACLE_MAX_AGE_MS,
-        solver_registry_id: option::none(),
-        protocol_treasury_id: option::none(),
-        supported_pairs: vec_set::empty(),
-        numeraire_pools: vec_map::empty(),
-        numeraire_type: option::none(),
-        pair_fee_tiers: vec_map::empty(),
-        fee_vaults: vec_map::empty(),
+        auction: AuctionConfig {
+            collection_duration_ms: DEFAULT_COLLECTION_MS,
+            bid_duration_ms: DEFAULT_BID_MS,
+            selection_duration_ms: DEFAULT_SELECTION_MS,
+            settlement_deadline_ms: DEFAULT_SETTLEMENT_DEADLINE_MS,
+            min_batch_collect_ms: DEFAULT_MIN_BATCH_COLLECT_MS,
+            max_allocations: DEFAULT_MAX_ALLOCATIONS,
+            max_allocation_bids: DEFAULT_MAX_ALLOCATION_BIDS,
+            max_allocation_intents: DEFAULT_MAX_ALLOCATION_INTENTS,
+            max_allocation_pairs: DEFAULT_MAX_ALLOCATION_PAIRS,
+        },
+        fees: FeeConfig {
+            standard_volume_fee_ppm: DEFAULT_STANDARD_VOLUME_FEE_PPM,
+            correlated_volume_fee_ppm: DEFAULT_CORRELATED_VOLUME_FEE_PPM,
+            surplus_fee_ppm: DEFAULT_SURPLUS_FEE_PPM,
+            surplus_fee_cap_ppm: DEFAULT_SURPLUS_FEE_CAP_PPM,
+            max_total_fee_ppm: DEFAULT_MAX_TOTAL_FEE_PPM,
+            solver_reward_fee_share_ppm: DEFAULT_SOLVER_REWARD_SHARE_PPM,
+        },
+        solver: SolverConfig {
+            min_solver_stake: DEFAULT_MIN_SOLVER_STAKE,
+            grief_factor_bps: DEFAULT_GRIEF_FACTOR_BPS,
+            required_allocation_stake: DEFAULT_ALLOCATION_STAKE,
+            required_benchmark_stake: DEFAULT_BENCHMARK_STAKE,
+            fallback_bounty_bps: DEFAULT_FALLBACK_BOUNTY_BPS,
+        },
+        price: PriceConfig {
+            max_slippage_tolerance_bps: DEFAULT_MAX_SLIPPAGE_BPS,
+            min_sbbo_mid_price: DEFAULT_MIN_SBBO_MID_PRICE,
+            price_oracle_max_age_ms: DEFAULT_PRICE_ORACLE_MAX_AGE_MS,
+        },
+        canonical: CanonicalConfig {
+            solver_registry_id: option::none(),
+            protocol_treasury_id: option::none(),
+        },
+        market: MarketConfig {
+            supported_pairs: vec_set::empty(),
+            numeraire_pools: vec_map::empty(),
+            numeraire_type: option::none(),
+            pair_fee_tiers: vec_map::empty(),
+            fee_vaults: vec_map::empty(),
+        },
         acl,
     });
     transfer::public_transfer(admin, ctx.sender());
@@ -215,114 +244,117 @@ fun set(field: &mut u64, v: u64, key: vector<u8>) {
 
 public fun set_collection_duration(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.collection_duration_ms, v, b"collection_duration_ms");
+    set(&mut c.auction.collection_duration_ms, v, b"collection_duration_ms");
 }
 
 public fun set_bid_duration(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.bid_duration_ms, v, b"bid_duration_ms");
+    set(&mut c.auction.bid_duration_ms, v, b"bid_duration_ms");
 }
 
 public fun set_selection_duration(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.selection_duration_ms, v, b"selection_duration_ms");
+    set(&mut c.auction.selection_duration_ms, v, b"selection_duration_ms");
 }
 
 public fun set_settlement_deadline(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.settlement_deadline_ms, v, b"settlement_deadline_ms");
+    set(&mut c.auction.settlement_deadline_ms, v, b"settlement_deadline_ms");
 }
 
 public fun set_min_batch_collect(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    set(&mut c.min_batch_collect_ms, v, b"min_batch_collect_ms");
+    set(&mut c.auction.min_batch_collect_ms, v, b"min_batch_collect_ms");
 }
 
 public fun set_standard_volume_fee_ppm(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    assert!(v <= MAX_VOLUME_FEE_PPM && v <= c.max_total_fee_ppm, EInvalidParam);
-    set(&mut c.standard_volume_fee_ppm, v, b"standard_volume_fee_ppm");
+    assert!(v <= MAX_VOLUME_FEE_PPM && v <= c.fees.max_total_fee_ppm, EInvalidParam);
+    set(&mut c.fees.standard_volume_fee_ppm, v, b"standard_volume_fee_ppm");
 }
 
 public fun set_correlated_volume_fee_ppm(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    assert!(v <= MAX_VOLUME_FEE_PPM && v <= c.max_total_fee_ppm, EInvalidParam);
-    set(&mut c.correlated_volume_fee_ppm, v, b"correlated_volume_fee_ppm");
+    assert!(v <= MAX_VOLUME_FEE_PPM && v <= c.fees.max_total_fee_ppm, EInvalidParam);
+    set(&mut c.fees.correlated_volume_fee_ppm, v, b"correlated_volume_fee_ppm");
 }
 
 public fun set_surplus_fee_ppm(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v <= MAX_SURPLUS_FEE_PPM, EInvalidParam);
-    set(&mut c.surplus_fee_ppm, v, b"surplus_fee_ppm");
+    set(&mut c.fees.surplus_fee_ppm, v, b"surplus_fee_ppm");
 }
 
 public fun set_surplus_fee_cap_ppm(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v <= MAX_SURPLUS_FEE_CAP_PPM, EInvalidParam);
-    set(&mut c.surplus_fee_cap_ppm, v, b"surplus_fee_cap_ppm");
+    set(&mut c.fees.surplus_fee_cap_ppm, v, b"surplus_fee_cap_ppm");
 }
 
 public fun set_max_total_fee_ppm(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v <= MAX_TOTAL_FEE_PPM, EInvalidParam);
-    assert!(v >= c.standard_volume_fee_ppm && v >= c.correlated_volume_fee_ppm, EInvalidParam);
-    set(&mut c.max_total_fee_ppm, v, b"max_total_fee_ppm");
+    assert!(
+        v >= c.fees.standard_volume_fee_ppm && v >= c.fees.correlated_volume_fee_ppm,
+        EInvalidParam,
+    );
+    set(&mut c.fees.max_total_fee_ppm, v, b"max_total_fee_ppm");
 }
 
 public fun set_solver_reward_share_ppm(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v <= MAX_SOLVER_REWARD_SHARE_PPM, EInvalidParam);
-    set(&mut c.solver_reward_fee_share_ppm, v, b"solver_reward_fee_share_ppm");
+    set(&mut c.fees.solver_reward_fee_share_ppm, v, b"solver_reward_fee_share_ppm");
 }
 
 public fun set_min_solver_stake(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.min_solver_stake, v, b"min_solver_stake");
+    set(&mut c.solver.min_solver_stake, v, b"min_solver_stake");
 }
 
 public fun set_grief_factor(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v >= MIN_GRIEF_FACTOR_BPS, EInvalidParam);
-    set(&mut c.grief_factor_bps, v, b"grief_factor_bps");
+    set(&mut c.solver.grief_factor_bps, v, b"grief_factor_bps");
 }
 
 public fun set_required_allocation_stake(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    set(&mut c.required_allocation_stake, v, b"required_allocation_stake");
+    set(&mut c.solver.required_allocation_stake, v, b"required_allocation_stake");
 }
 
 public fun set_required_benchmark_stake(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    set(&mut c.required_benchmark_stake, v, b"required_benchmark_stake");
+    set(&mut c.solver.required_benchmark_stake, v, b"required_benchmark_stake");
 }
 
 public fun set_fallback_bounty_bps(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v <= MAX_FALLBACK_BOUNTY_BPS, EInvalidParam);
-    set(&mut c.fallback_bounty_bps, v, b"fallback_bounty_bps");
+    set(&mut c.solver.fallback_bounty_bps, v, b"fallback_bounty_bps");
 }
 
 public fun set_max_allocations(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.max_allocations, v, b"max_allocations");
+    set(&mut c.auction.max_allocations, v, b"max_allocations");
 }
 
 public fun set_max_allocation_bids(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.max_allocation_bids, v, b"max_allocation_bids");
+    set(&mut c.auction.max_allocation_bids, v, b"max_allocation_bids");
 }
 
 public fun set_max_allocation_intents(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.max_allocation_intents, v, b"max_allocation_intents");
+    set(&mut c.auction.max_allocation_intents, v, b"max_allocation_intents");
 }
 
 public fun set_max_allocation_pairs(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.max_allocation_pairs, v, b"max_allocation_pairs");
+    set(&mut c.auction.max_allocation_pairs, v, b"max_allocation_pairs");
 }
 
 public fun set_max_slippage(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0 && v <= MAX_SLIPPAGE_BPS, EInvalidParam);
-    set(&mut c.max_slippage_tolerance_bps, v, b"max_slippage_tolerance_bps");
+    set(&mut c.price.max_slippage_tolerance_bps, v, b"max_slippage_tolerance_bps");
 }
 
 public fun set_min_sbbo_mid_price(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
     assert!(v > 0, EInvalidParam);
-    set(&mut c.min_sbbo_mid_price, v, b"min_sbbo_mid_price");
+    set(&mut c.price.min_sbbo_mid_price, v, b"min_sbbo_mid_price");
 }
 
 public fun set_price_oracle_max_age(c: &mut GlobalConfig, v: u64, _: &AdminCap) {
-    set(&mut c.price_oracle_max_age_ms, v, b"price_oracle_max_age_ms");
+    set(&mut c.price.price_oracle_max_age_ms, v, b"price_oracle_max_age_ms");
 }
 
 // === Pair fee tiers ===
@@ -334,29 +366,29 @@ public fun set_pair_fee_tier<Sell, Buy>(
 ) {
     // A Custom tier must respect the same volume-fee ceiling the global setters enforce;
     // otherwise a value above 1e6 ppm would underflow `gross - volume_fee` and brick the pair.
-    let max_total = c.max_total_fee_ppm;
+    let max_total = c.fees.max_total_fee_ppm;
     match (tier) {
         FeeTier::Custom(ppm) => assert!(ppm <= MAX_VOLUME_FEE_PPM && ppm <= max_total, EInvalidParam),
         _ => (),
     };
     let key = types::pair_key<Sell, Buy>();
-    if (c.pair_fee_tiers.contains(&key)) {
-        *c.pair_fee_tiers.get_mut(&key) = tier;
+    if (c.market.pair_fee_tiers.contains(&key)) {
+        *c.market.pair_fee_tiers.get_mut(&key) = tier;
     } else {
-        c.pair_fee_tiers.insert(key, tier);
+        c.market.pair_fee_tiers.insert(key, tier);
     };
 }
 
 public fun pair_fee_tier(c: &GlobalConfig, key: &PairKey): FeeTier {
-    if (c.pair_fee_tiers.contains(key)) *c.pair_fee_tiers.get(key)
+    if (c.market.pair_fee_tiers.contains(key)) *c.market.pair_fee_tiers.get(key)
     else FeeTier::Standard
 }
 
 /// Returns volume_fee_ppm for the pair's tier.
 public fun volume_fee_ppm_for_pair(c: &GlobalConfig, key: &PairKey): u64 {
     match (pair_fee_tier(c, key)) {
-        FeeTier::Standard => c.standard_volume_fee_ppm,
-        FeeTier::Correlated => c.correlated_volume_fee_ppm,
+        FeeTier::Standard => c.fees.standard_volume_fee_ppm,
+        FeeTier::Correlated => c.fees.correlated_volume_fee_ppm,
         FeeTier::Custom(ppm) => ppm,
         FeeTier::Disabled => 0,
     }
@@ -366,18 +398,18 @@ public fun volume_fee_ppm_for_pair(c: &GlobalConfig, key: &PairKey): u64 {
 
 public fun register_fee_vault<T>(c: &mut GlobalConfig, vault_id: ID, _: &AdminCap) {
     let key = type_name::with_defining_ids<T>();
-    if (c.fee_vaults.contains(&key)) {
-        *c.fee_vaults.get_mut(&key) = vault_id;
+    if (c.market.fee_vaults.contains(&key)) {
+        *c.market.fee_vaults.get_mut(&key) = vault_id;
     } else {
-        c.fee_vaults.insert(key, vault_id);
+        c.market.fee_vaults.insert(key, vault_id);
     };
     events::emit_fee_vault_registered(key, vault_id);
 }
 
 public fun fee_vault_id<T>(c: &GlobalConfig): ID {
     let key = type_name::with_defining_ids<T>();
-    assert!(c.fee_vaults.contains(&key), EFeeVaultNotRegistered);
-    *c.fee_vaults.get(&key)
+    assert!(c.market.fee_vaults.contains(&key), EFeeVaultNotRegistered);
+    *c.market.fee_vaults.get(&key)
 }
 
 public fun assert_fee_vault_id<T>(c: &GlobalConfig, id: ID) {
@@ -397,20 +429,20 @@ public fun add_supported_pair<Sell, Buy>(c: &mut GlobalConfig, _: &AdminCap) {
     // `numeraire_type` aborts if the numeraire is unset, so the numeraire must be configured first.
     assert!(type_name::with_defining_ids<Buy>() == numeraire_type(c), ENonNumeraireBuy);
     let key = types::pair_key<Sell, Buy>();
-    if (!c.supported_pairs.contains(&key)) c.supported_pairs.insert(key);
+    if (!c.market.supported_pairs.contains(&key)) c.market.supported_pairs.insert(key);
 }
 
 public fun remove_supported_pair<Sell, Buy>(c: &mut GlobalConfig, _: &AdminCap) {
     let key = types::pair_key<Sell, Buy>();
-    if (c.supported_pairs.contains(&key)) c.supported_pairs.remove(&key);
+    if (c.market.supported_pairs.contains(&key)) c.market.supported_pairs.remove(&key);
 }
 
 public fun is_pair_supported(c: &GlobalConfig, key: &PairKey): bool {
-    c.supported_pairs.contains(key)
+    c.market.supported_pairs.contains(key)
 }
 
 public fun assert_pair_supported(c: &GlobalConfig, key: &PairKey) {
-    assert!(c.supported_pairs.contains(key), EPairNotSupported);
+    assert!(c.market.supported_pairs.contains(key), EPairNotSupported);
 }
 
 public fun set_numeraire<N>(c: &mut GlobalConfig, _: &AdminCap) {
@@ -418,119 +450,121 @@ public fun set_numeraire<N>(c: &mut GlobalConfig, _: &AdminCap) {
     // (`add_supported_pair`). Forbid changing it once any pair is allowlisted; otherwise existing
     // pairs whose Buy was the old numeraire would silently become non-numeraire-Buy and reopen the
     // cross-token reward hole (F-009-1). Set the numeraire first, then allowlist pairs.
-    assert!(c.supported_pairs.length() == 0, ENumeraireLocked);
-    c.numeraire_type = option::some(type_name::with_defining_ids<N>());
+    assert!(c.market.supported_pairs.length() == 0, ENumeraireLocked);
+    c.market.numeraire_type = option::some(type_name::with_defining_ids<N>());
 }
 
 public fun add_numeraire_pool<Token>(c: &mut GlobalConfig, pool_id: ID, _: &AdminCap) {
     let key = type_name::with_defining_ids<Token>();
-    if (c.numeraire_pools.contains(&key)) {
-        *c.numeraire_pools.get_mut(&key) = pool_id;
+    if (c.market.numeraire_pools.contains(&key)) {
+        *c.market.numeraire_pools.get_mut(&key) = pool_id;
     } else {
-        c.numeraire_pools.insert(key, pool_id);
+        c.market.numeraire_pools.insert(key, pool_id);
     };
 }
 
 public fun remove_numeraire_pool<Token>(c: &mut GlobalConfig, _: &AdminCap) {
     let key = type_name::with_defining_ids<Token>();
-    if (c.numeraire_pools.contains(&key)) { c.numeraire_pools.remove(&key); };
+    if (c.market.numeraire_pools.contains(&key)) { c.market.numeraire_pools.remove(&key); };
 }
 
 public fun numeraire_pool_id(c: &GlobalConfig, token: TypeName): Option<ID> {
-    if (c.numeraire_pools.contains(&token)) option::some(*c.numeraire_pools.get(&token))
+    if (c.market.numeraire_pools.contains(&token)) option::some(*c.market.numeraire_pools.get(&token))
     else option::none()
 }
 
 public fun numeraire_type(c: &GlobalConfig): TypeName {
-    assert!(c.numeraire_type.is_some(), ENumeraireNotSet);
-    *c.numeraire_type.borrow()
+    assert!(c.market.numeraire_type.is_some(), ENumeraireNotSet);
+    *c.market.numeraire_type.borrow()
 }
 
 public fun set_solver_registry_id(c: &mut GlobalConfig, id: ID, _: &AdminCap) {
-    if (c.solver_registry_id.is_some()) {
-        assert!(*c.solver_registry_id.borrow() == id, ECanonicalObjectAlreadySet);
+    if (c.canonical.solver_registry_id.is_some()) {
+        assert!(*c.canonical.solver_registry_id.borrow() == id, ECanonicalObjectAlreadySet);
     } else {
-        c.solver_registry_id = option::some(id);
+        c.canonical.solver_registry_id = option::some(id);
     };
 }
 
 public fun set_protocol_treasury_id(c: &mut GlobalConfig, id: ID, _: &AdminCap) {
-    if (c.protocol_treasury_id.is_some()) {
-        assert!(*c.protocol_treasury_id.borrow() == id, ECanonicalObjectAlreadySet);
+    if (c.canonical.protocol_treasury_id.is_some()) {
+        assert!(*c.canonical.protocol_treasury_id.borrow() == id, ECanonicalObjectAlreadySet);
     } else {
-        c.protocol_treasury_id = option::some(id);
+        c.canonical.protocol_treasury_id = option::some(id);
     };
 }
 
 public fun assert_solver_registry_id(c: &GlobalConfig, id: ID) {
-    assert!(c.solver_registry_id.is_some(), ECanonicalObjectNotSet);
-    assert!(*c.solver_registry_id.borrow() == id, EWrongCanonicalObject);
+    assert!(c.canonical.solver_registry_id.is_some(), ECanonicalObjectNotSet);
+    assert!(*c.canonical.solver_registry_id.borrow() == id, EWrongCanonicalObject);
 }
 
 public fun assert_protocol_treasury_id(c: &GlobalConfig, id: ID) {
-    assert!(c.protocol_treasury_id.is_some(), ECanonicalObjectNotSet);
-    assert!(*c.protocol_treasury_id.borrow() == id, EWrongCanonicalObject);
+    assert!(c.canonical.protocol_treasury_id.is_some(), ECanonicalObjectNotSet);
+    assert!(*c.canonical.protocol_treasury_id.borrow() == id, EWrongCanonicalObject);
 }
 
 // === Getters ===
 
 public fun version(c: &GlobalConfig): u64 { c.version }
 
-public fun collection_duration_ms(c: &GlobalConfig): u64 { c.collection_duration_ms }
+public fun collection_duration_ms(c: &GlobalConfig): u64 { c.auction.collection_duration_ms }
 
-public fun bid_duration_ms(c: &GlobalConfig): u64 { c.bid_duration_ms }
+public fun bid_duration_ms(c: &GlobalConfig): u64 { c.auction.bid_duration_ms }
 
-public fun selection_duration_ms(c: &GlobalConfig): u64 { c.selection_duration_ms }
+public fun selection_duration_ms(c: &GlobalConfig): u64 { c.auction.selection_duration_ms }
 
-public fun settlement_deadline_ms(c: &GlobalConfig): u64 { c.settlement_deadline_ms }
+public fun settlement_deadline_ms(c: &GlobalConfig): u64 { c.auction.settlement_deadline_ms }
 
-public fun min_batch_collect_ms(c: &GlobalConfig): u64 { c.min_batch_collect_ms }
+public fun min_batch_collect_ms(c: &GlobalConfig): u64 { c.auction.min_batch_collect_ms }
 
-public fun standard_volume_fee_ppm(c: &GlobalConfig): u64 { c.standard_volume_fee_ppm }
+public fun standard_volume_fee_ppm(c: &GlobalConfig): u64 { c.fees.standard_volume_fee_ppm }
 
-public fun correlated_volume_fee_ppm(c: &GlobalConfig): u64 { c.correlated_volume_fee_ppm }
+public fun correlated_volume_fee_ppm(c: &GlobalConfig): u64 { c.fees.correlated_volume_fee_ppm }
 
-public fun surplus_fee_ppm(c: &GlobalConfig): u64 { c.surplus_fee_ppm }
+public fun surplus_fee_ppm(c: &GlobalConfig): u64 { c.fees.surplus_fee_ppm }
 
-public fun surplus_fee_cap_ppm(c: &GlobalConfig): u64 { c.surplus_fee_cap_ppm }
+public fun surplus_fee_cap_ppm(c: &GlobalConfig): u64 { c.fees.surplus_fee_cap_ppm }
 
-public fun max_total_fee_ppm(c: &GlobalConfig): u64 { c.max_total_fee_ppm }
+public fun max_total_fee_ppm(c: &GlobalConfig): u64 { c.fees.max_total_fee_ppm }
 
-public fun solver_reward_fee_share_ppm(c: &GlobalConfig): u64 { c.solver_reward_fee_share_ppm }
+public fun solver_reward_fee_share_ppm(c: &GlobalConfig): u64 {
+    c.fees.solver_reward_fee_share_ppm
+}
 
-public fun min_solver_stake(c: &GlobalConfig): u64 { c.min_solver_stake }
+public fun min_solver_stake(c: &GlobalConfig): u64 { c.solver.min_solver_stake }
 
-public fun grief_factor_bps(c: &GlobalConfig): u64 { c.grief_factor_bps }
+public fun grief_factor_bps(c: &GlobalConfig): u64 { c.solver.grief_factor_bps }
 
-public fun required_allocation_stake(c: &GlobalConfig): u64 { c.required_allocation_stake }
+public fun required_allocation_stake(c: &GlobalConfig): u64 { c.solver.required_allocation_stake }
 
-public fun required_benchmark_stake(c: &GlobalConfig): u64 { c.required_benchmark_stake }
+public fun required_benchmark_stake(c: &GlobalConfig): u64 { c.solver.required_benchmark_stake }
 
-public fun fallback_bounty_bps(c: &GlobalConfig): u64 { c.fallback_bounty_bps }
+public fun fallback_bounty_bps(c: &GlobalConfig): u64 { c.solver.fallback_bounty_bps }
 
-public fun max_allocations(c: &GlobalConfig): u64 { c.max_allocations }
+public fun max_allocations(c: &GlobalConfig): u64 { c.auction.max_allocations }
 
-public fun max_allocation_bids(c: &GlobalConfig): u64 { c.max_allocation_bids }
+public fun max_allocation_bids(c: &GlobalConfig): u64 { c.auction.max_allocation_bids }
 
-public fun max_allocation_intents(c: &GlobalConfig): u64 { c.max_allocation_intents }
+public fun max_allocation_intents(c: &GlobalConfig): u64 { c.auction.max_allocation_intents }
 
-public fun max_allocation_pairs(c: &GlobalConfig): u64 { c.max_allocation_pairs }
+public fun max_allocation_pairs(c: &GlobalConfig): u64 { c.auction.max_allocation_pairs }
 
 public fun solver_registry_id(c: &GlobalConfig): ID {
-    assert!(c.solver_registry_id.is_some(), ECanonicalObjectNotSet);
-    *c.solver_registry_id.borrow()
+    assert!(c.canonical.solver_registry_id.is_some(), ECanonicalObjectNotSet);
+    *c.canonical.solver_registry_id.borrow()
 }
 
 public fun protocol_treasury_id(c: &GlobalConfig): ID {
-    assert!(c.protocol_treasury_id.is_some(), ECanonicalObjectNotSet);
-    *c.protocol_treasury_id.borrow()
+    assert!(c.canonical.protocol_treasury_id.is_some(), ECanonicalObjectNotSet);
+    *c.canonical.protocol_treasury_id.borrow()
 }
 
-public fun max_slippage_tolerance_bps(c: &GlobalConfig): u64 { c.max_slippage_tolerance_bps }
+public fun max_slippage_tolerance_bps(c: &GlobalConfig): u64 { c.price.max_slippage_tolerance_bps }
 
-public fun min_sbbo_mid_price(c: &GlobalConfig): u64 { c.min_sbbo_mid_price }
+public fun min_sbbo_mid_price(c: &GlobalConfig): u64 { c.price.min_sbbo_mid_price }
 
-public fun price_oracle_max_age_ms(c: &GlobalConfig): u64 { c.price_oracle_max_age_ms }
+public fun price_oracle_max_age_ms(c: &GlobalConfig): u64 { c.price.price_oracle_max_age_ms }
 
 // === FeeTier constructors (public so external callers can pass tier values) ===
 
