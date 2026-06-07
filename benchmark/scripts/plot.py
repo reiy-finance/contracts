@@ -29,9 +29,9 @@ def main():
     write_latency_pdf(out_dir / "latency.pdf", run, records)
     write_gas_pdf(out_dir / "gas.pdf", run, records)
     write_summary_pdf(out_dir / "summary.pdf", run, by_op)
-    bid_records = [record for record in records if record.get("op") == "submit_bid"]
-    if bid_records:
-        write_bid_batches_pdf(out_dir / "bid_batches.pdf", run, bid_records)
+    settlement_records = [record for record in records if record.get("op") == "settle_solution"]
+    if settlement_records:
+        write_settlement_batches_pdf(out_dir / "settlement_batches.pdf", run, settlement_records)
     print(f"figures: {out_dir}")
 
 
@@ -90,7 +90,7 @@ def write_summary_pdf(path, run, by_op):
 
     latency_avg = [avg([num(r.get("latencyMs")) for r in by_op[label]]) for label in labels]
     latency_p90 = [percentile([num(r.get("latencyMs")) for r in by_op[label]], 0.9) for label in labels]
-    gas_avg = [avg([num(r.get("gasMist")) for r in by_op[label]]) for label in labels]
+    gas_avg = [avg([record_value(r, "gasMist") for r in by_op[label]]) for label in labels]
     success = [sum(1 for r in by_op[label] if r.get("status") == "success") for label in labels]
     failed = [sum(1 for r in by_op[label] if r.get("status") != "success") for label in labels]
 
@@ -130,65 +130,91 @@ def write_summary_pdf(path, run, by_op):
         write_summary_table_page(pdf, run, by_op)
 
 
-def write_bid_batches_pdf(path, run, records):
+def write_settlement_batches_pdf(path, run, records):
     xs = list(range(1, len(records) + 1))
     batch_sizes = [num(record.get("intentCount")) or 0 for record in records]
     latencies = [num(record.get("latencyMs")) or 0 for record in records]
-    gas = [num(record.get("gasMist")) or 0 for record in records]
+    gas = [record_value(record, "gasMist") or 0 for record in records]
     gas_per_intent = [g / b if b else 0 for g, b in zip(gas, batch_sizes)]
+    protocol_fee = [num(record.get("estimatedProtocolFeeMist")) or 0 for record in records]
+    solver_fee = [num(record.get("estimatedSolverFeeMist")) or 0 for record in records]
+    protocol_fee_per_intent = [g / b if b else 0 for g, b in zip(protocol_fee, batch_sizes)]
+    solver_fee_per_intent = [g / b if b else 0 for g, b in zip(solver_fee, batch_sizes)]
 
     with PdfPages(path) as pdf:
-        fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+        fig, axes = plt.subplots(3, 2, figsize=(11.5, 10.2))
 
         axes[0][0].bar(xs, batch_sizes, color="#475569")
-        axes[0][0].set_title("intents per bid tx")
+        axes[0][0].set_title("intents per settlement tx")
         axes[0][0].set_ylabel("intents")
 
         axes[0][1].plot(xs, latencies, marker="o", linewidth=1.2, markersize=3, color="#2563eb")
-        axes[0][1].set_title("bid latency")
+        axes[0][1].set_title("settlement latency")
         axes[0][1].set_ylabel("ms")
 
         axes[1][0].plot(xs, gas, marker="o", linewidth=1.2, markersize=3, color="#059669")
-        axes[1][0].set_title("bid gas")
+        axes[1][0].set_title("settlement gas")
         axes[1][0].set_ylabel("MIST")
 
         axes[1][1].plot(xs, gas_per_intent, marker="o", linewidth=1.2, markersize=3, color="#d97706")
-        axes[1][1].set_title("bid gas per intent")
+        axes[1][1].set_title("settlement gas per intent")
         axes[1][1].set_ylabel("MIST / intent")
 
+        axes[2][0].plot(xs, protocol_fee_per_intent, marker="o", linewidth=1.2, markersize=3, color="#0f766e")
+        axes[2][0].set_title("protocol fee per intent")
+        axes[2][0].set_ylabel("MIST / intent")
+
+        axes[2][1].plot(xs, solver_fee_per_intent, marker="o", linewidth=1.2, markersize=3, color="#7c3aed")
+        axes[2][1].set_title("solver fee share per intent")
+        axes[2][1].set_ylabel("MIST / intent")
+
         for ax in axes.flatten():
-            ax.set_xlabel("bid batch index")
+            ax.set_xlabel("settlement batch index")
             ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
-            ax.yaxis.set_major_locator(MaxNLocator(nbins=7))
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=9))
             ax.grid(True, alpha=0.25)
 
         axes[0][0].yaxis.set_major_formatter(FuncFormatter(lambda value, _: format_compact(value)))
         axes[0][1].yaxis.set_major_formatter(FuncFormatter(lambda value, _: format_ms(value)))
         axes[1][0].yaxis.set_major_formatter(FuncFormatter(lambda value, _: format_compact(value)))
         axes[1][1].yaxis.set_major_formatter(FuncFormatter(lambda value, _: format_compact(value)))
+        axes[2][0].yaxis.set_major_formatter(FuncFormatter(lambda value, _: format_compact(value)))
+        axes[2][1].yaxis.set_major_formatter(FuncFormatter(lambda value, _: format_compact(value)))
 
         for ax, ys, fmt in [
             (axes[0][0], batch_sizes, format_compact),
             (axes[0][1], latencies, format_ms),
             (axes[1][0], gas, format_compact),
             (axes[1][1], gas_per_intent, format_compact),
+            (axes[2][0], protocol_fee_per_intent, format_compact),
+            (axes[2][1], solver_fee_per_intent, format_compact),
         ]:
             fit_y_axis(ax, ys)
             annotate_points(ax, xs, ys, fmt, dense_limit=12)
 
-        fig.suptitle(f"{run['runId']} bid batches")
+        fig.suptitle(f"{run['runId']} settlement batches")
         fig.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
 
-        write_bid_table_page(pdf, run, records, batch_sizes, latencies, gas, gas_per_intent)
+        write_settlement_table_page(
+            pdf,
+            run,
+            records,
+            batch_sizes,
+            latencies,
+            gas,
+            gas_per_intent,
+            protocol_fee_per_intent,
+            solver_fee_per_intent,
+        )
 
 
 def grouped_series(records, field):
     pos = 1
     grouped = defaultdict(lambda: ([], []))
     for record in records:
-        value = num(record.get(field))
+        value = record_value(record, field)
         if value is None:
             pos += 1
             continue
@@ -207,7 +233,7 @@ def grouped_records(records):
 
 
 def values_for(records, field):
-    return [value for value in [num(record.get(field)) for record in records] if value is not None]
+    return [value for value in [record_value(record, field) for record in records] if value is not None]
 
 
 def style_axis(ax, formatter):
@@ -229,7 +255,8 @@ def fit_y_axis(ax, values):
         pad = max(abs(low) * 0.1, 1)
     else:
         pad = (high - low) * 0.12
-    ax.set_ylim(max(0, low - pad), high + pad)
+    floor = 0 if low >= 0 else low - pad
+    ax.set_ylim(floor, high + pad)
 
 
 def annotate_points(ax, xs, ys, formatter, dense_limit=20):
@@ -321,7 +348,17 @@ def write_summary_table_page(pdf, run, by_op):
     plt.close(fig)
 
 
-def write_bid_table_page(pdf, run, records, batch_sizes, latencies, gas, gas_per_intent):
+def write_settlement_table_page(
+    pdf,
+    run,
+    records,
+    batch_sizes,
+    latencies,
+    gas,
+    gas_per_intent,
+    protocol_fee_per_intent,
+    solver_fee_per_intent,
+):
     rows = []
     for idx, record in enumerate(records):
         rows.append([
@@ -330,16 +367,18 @@ def write_bid_table_page(pdf, run, records, batch_sizes, latencies, gas, gas_per
             format_ms(latencies[idx]),
             format_compact(gas[idx]),
             format_compact(gas_per_intent[idx]),
-            str(record.get("bidSeq", "")),
+            format_compact(protocol_fee_per_intent[idx]),
+            format_compact(solver_fee_per_intent[idx]),
+            str(record.get("solutionId", "")),
             str(record.get("status", "")),
         ])
 
     fig, ax = plt.subplots(figsize=(12.5, 7.2))
     ax.axis("off")
-    ax.set_title(f"{run['runId']} bid batch detail table", pad=18)
+    ax.set_title(f"{run['runId']} settlement batch detail table", pad=18)
     table = ax.table(
         cellText=rows,
-        colLabels=["batch", "intents", "latency", "gas", "gas / intent", "bid seq", "status"],
+        colLabels=["batch", "intents", "latency", "gas", "gas / intent", "protocol fee / intent", "solver fee / intent", "solution", "status"],
         cellLoc="right",
         colLoc="right",
         loc="center",
@@ -359,6 +398,16 @@ def num(value):
     except Exception:
         return None
     return value if math.isfinite(value) else None
+
+
+def record_value(record, field):
+    value = num(record.get(field))
+    if value is not None or field != "gasMist":
+        return value
+    parts = [record.get("computationCost"), record.get("storageCost"), record.get("storageRebate")]
+    if all(part is None for part in parts):
+        return None
+    return (num(parts[0]) or 0) + (num(parts[1]) or 0) - (num(parts[2]) or 0)
 
 
 def avg(values):

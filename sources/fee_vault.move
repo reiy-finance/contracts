@@ -1,7 +1,6 @@
 // Copyright (c) Reiy Finance
 
-/// Per-token protocol fee vault. Settlement deposits Buy-token fees here;
-/// ProtocolTreasury is only used for slashed stake and governance subsidies.
+/// Per-token protocol fee vault. Settlement deposits the protocol share of Buy-token fees here.
 module reiy::fee_vault;
 
 use reiy::config::{GlobalConfig, AdminCap};
@@ -44,13 +43,6 @@ public fun withdraw_fees<T>(
     _cap: &AdminCap,
     ctx: &mut TxContext,
 ): Coin<T> {
-    assert!(amount <= vault.balance.value(), EInsufficient);
-    coin::take(&mut vault.balance, amount, ctx)
-}
-
-/// Programmatic reward payout called by settlement::close_batch.
-/// Does NOT require AdminCap — callable by any module in the package.
-public(package) fun pay_reward<T>(vault: &mut FeeVault<T>, amount: u64, ctx: &mut TxContext): Coin<T> {
     assert!(amount <= vault.balance.value(), EInsufficient);
     coin::take(&mut vault.balance, amount, ctx)
 }

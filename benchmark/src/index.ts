@@ -1,1 +1,1 @@
-console.log('Use bun run doctor | intents | advance | register-solver | bids');
+console.log('Use bun run doctor | register-solver | intents | settlements | e2e');

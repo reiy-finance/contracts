@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import type { BidBatchSummary, Summary, TxRecord } from './types.ts';
+import type { SettlementBatchSummary, Summary, TxRecord } from './types.ts';
 
 export type RunFile<T extends TxRecord> = {
   runId: string;
@@ -13,7 +13,7 @@ export type RunFile<T extends TxRecord> = {
   records: T[];
   summary: Summary;
   summaries?: Record<string, Summary>;
-  bidBatchSummary?: BidBatchSummary;
+  settlementBatchSummary?: SettlementBatchSummary;
 };
 
 export function createRunDir(baseDir: string, prefix: string) {
@@ -31,7 +31,7 @@ export async function writeJson(path: string, data: unknown) {
 export async function writeRun<T extends TxRecord>(runDir: string, run: RunFile<T>) {
   await writeJson(join(runDir, 'records.json'), run.records);
   await writeJson(join(runDir, 'summary.json'), run.summary);
-  if (run.bidBatchSummary) await writeJson(join(runDir, 'bid-batches.json'), run.bidBatchSummary);
+  if (run.settlementBatchSummary) await writeJson(join(runDir, 'settlement-batches.json'), run.settlementBatchSummary);
   await writeJson(join(runDir, 'run.json'), run);
   renderFigures(join(runDir, 'run.json'), join(runDir, 'figures'));
 }

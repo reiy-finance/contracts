@@ -7,6 +7,8 @@ use reiy::test_helpers::{Self as h, USDC, TOKA, TOKB};
 
 const ADMIN: address = @0xAD;
 const BOB: address = @0xB0B;
+const COORDINATOR_PUBKEY_2: vector<u8> =
+    x"0101010101010101010101010101010101010101010101010101010101010101";
 
 #[test]
 fun test_defaults() {
@@ -16,22 +18,19 @@ fun test_defaults() {
     ts::next_tx(&mut sc, ADMIN);
     {
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        assert!(config::version(&cfg) == 5, 0);
+        assert!(config::version(&cfg) == 7, 0);
         // PPM fee defaults
-        assert!(config::standard_volume_fee_ppm(&cfg) == 200, 1);
-        assert!(config::correlated_volume_fee_ppm(&cfg) == 30, 2);
-        assert!(config::surplus_fee_ppm(&cfg) == 500_000, 3);
-        assert!(config::surplus_fee_cap_ppm(&cfg) == 9_800, 4);
-        assert!(config::max_total_fee_ppm(&cfg) == 10_000, 5);
-        assert!(config::solver_reward_fee_share_ppm(&cfg) == 500_000, 6); // β = 50% mainnet default
-        // Other defaults unchanged
+        assert!(config::standard_volume_fee_ppm(&cfg) == 75, 1);
+        assert!(config::correlated_volume_fee_ppm(&cfg) == 10, 2);
+        assert!(config::surplus_fee_ppm(&cfg) == 100_000, 3);
+        assert!(config::surplus_fee_cap_ppm(&cfg) == 1_000, 4);
+        assert!(config::max_total_fee_ppm(&cfg) == 1_500, 5);
+        assert!(config::solver_fee_share_ppm(&cfg) == 350_000, 6);
         assert!(config::max_slippage_tolerance_bps(&cfg) == 500, 7);
-        assert!(config::grief_factor_bps(&cfg) == 15_000, 8);
-        assert!(config::fallback_bounty_bps(&cfg) == 0, 9);
-        assert!(config::max_allocations(&cfg) == 64, 10);
-        assert!(config::max_allocation_bids(&cfg) == 32, 11);
-        assert!(config::max_allocation_intents(&cfg) == 128, 12);
-        assert!(config::max_allocation_pairs(&cfg) == 16, 13);
+        assert!(config::min_batch_collect_ms(&cfg) == 10_000, 8);
+        assert!(config::min_solver_stake(&cfg) == 1_000_000_000, 9);
+        assert!(config::execution_coordinator_pubkey(&cfg).length() == 0, 10);
+        assert!(config::execution_coordinator_key_version(&cfg) == 0, 11);
         ts::return_shared(cfg);
     };
     ts::end(sc);
@@ -52,23 +51,18 @@ fun test_setters_and_allowlists() {
         assert!(config::correlated_volume_fee_ppm(&cfg) == 20, 1);
         config::set_surplus_fee_ppm(&mut cfg, 300_000, &cap);
         assert!(config::surplus_fee_ppm(&cfg) == 300_000, 2);
-        // Other setters
+        config::set_solver_fee_share_ppm(&mut cfg, 600_000, &cap);
+        assert!(config::solver_fee_share_ppm(&cfg) == 600_000, 12);
+        config::set_min_batch_collect(&mut cfg, 2_000, &cap);
+        assert!(config::min_batch_collect_ms(&cfg) == 2_000, 13);
+        config::set_min_solver_stake(&mut cfg, 2_000_000_000, &cap);
+        assert!(config::min_solver_stake(&cfg) == 2_000_000_000, 14);
+        config::set_execution_coordinator(&mut cfg, COORDINATOR_PUBKEY_2, 2, &cap);
+        assert!(config::execution_coordinator_key_version(&cfg) == 2, 15);
         config::set_max_slippage(&mut cfg, 300, &cap);
         assert!(config::max_slippage_tolerance_bps(&cfg) == 300, 3);
-        config::set_fallback_bounty_bps(&mut cfg, 500, &cap);
-        assert!(config::fallback_bounty_bps(&cfg) == 500, 4);
-        config::set_max_allocations(&mut cfg, 16, &cap);
-        assert!(config::max_allocations(&cfg) == 16, 10);
-        config::set_max_allocation_bids(&mut cfg, 8, &cap);
-        assert!(config::max_allocation_bids(&cfg) == 8, 5);
-        config::set_max_allocation_intents(&mut cfg, 16, &cap);
-        assert!(config::max_allocation_intents(&cfg) == 16, 6);
-        config::set_max_allocation_pairs(&mut cfg, 4, &cap);
-        assert!(config::max_allocation_pairs(&cfg) == 4, 7);
         let registry_id = config::solver_registry_id(&cfg);
-        let treasury_id = config::protocol_treasury_id(&cfg);
         config::set_solver_registry_id(&mut cfg, registry_id, &cap);
-        config::set_protocol_treasury_id(&mut cfg, treasury_id, &cap);
         assert!(config::is_pair_supported(&cfg, &reiy::types::pair_key<TOKA, USDC>()), 8);
         config::remove_supported_pair<TOKA, USDC>(&mut cfg, &cap);
         assert!(!config::is_pair_supported(&cfg, &reiy::types::pair_key<TOKA, USDC>()), 9);
@@ -114,40 +108,23 @@ fun test_volume_fee_ppm_over_max_aborts() {
 }
 
 #[test]
-#[expected_failure(abort_code = reiy::config::EInvalidParam)]
-fun test_fallback_bounty_over_max_aborts() {
+#[expected_failure(abort_code = reiy::config::EBadCoordinatorKey)]
+fun test_bad_coordinator_key_aborts() {
     let mut sc = ts::begin(ADMIN);
     h::setup_all(&mut sc, ADMIN);
     ts::next_tx(&mut sc, ADMIN);
     {
         let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
         let cap = ts::take_from_sender<AdminCap>(&mut sc);
-        config::set_fallback_bounty_bps(&mut cfg, 1_001, &cap); // > 10%
+        config::set_execution_coordinator(&mut cfg, b"short", 2, &cap);
         ts::return_to_sender(&mut sc, cap);
         ts::return_shared(cfg);
     };
     ts::end(sc);
 }
 
-#[test]
-#[expected_failure(abort_code = reiy::config::EInvalidParam)]
-fun test_grief_factor_below_one_aborts() {
-    let mut sc = ts::begin(ADMIN);
-    h::setup_all(&mut sc, ADMIN);
-    ts::next_tx(&mut sc, ADMIN);
-    {
-        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        let cap = ts::take_from_sender<AdminCap>(&mut sc);
-        config::set_grief_factor(&mut cfg, 9_999, &cap); // < 1.0x
-        ts::return_to_sender(&mut sc, cap);
-        ts::return_shared(cfg);
-    };
-    ts::end(sc);
-}
-
-/// F-009-1 (v1 numeraire-only gate): a supported pair whose Buy token is not the numeraire must be
-/// rejected at the allowlist, so no non-numeraire-Buy intent can ever exist and the VCG reward cap
-/// stays denominated in the numeraire. Numeraire is USDC (set in setup_all); TOKA/TOKB buys TOKB.
+/// V1 numeraire-only gate: a supported pair whose Buy token is not the numeraire must be rejected
+/// so fees and immediate solver shares stay denominated in the payout token.
 #[test]
 #[expected_failure(abort_code = reiy::config::ENonNumeraireBuy)]
 fun test_non_numeraire_buy_pair_rejected() {
@@ -224,15 +201,15 @@ fun test_pair_fee_tier_correlated() {
         let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
         let cap = ts::take_from_sender<AdminCap>(&mut sc);
         let pair_key = reiy::types::pair_key<TOKA, USDC>();
-        // Default is Standard (200 ppm)
-        assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 200, 0);
+        // Default is Standard (75 ppm)
+        assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 75, 0);
         config::set_pair_fee_tier<TOKA, USDC>(&mut cfg, config::fee_tier_correlated(), &cap);
-        assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 30, 1);
+        assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 10, 1);
         config::set_pair_fee_tier<TOKA, USDC>(&mut cfg, config::fee_tier_disabled(), &cap);
         assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 0, 2);
         // Custom tier within the volume-fee ceiling is accepted
-        config::set_pair_fee_tier<TOKA, USDC>(&mut cfg, config::fee_tier_custom(5_000), &cap);
-        assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 5_000, 3);
+        config::set_pair_fee_tier<TOKA, USDC>(&mut cfg, config::fee_tier_custom(1_000), &cap);
+        assert!(config::volume_fee_ppm_for_pair(&cfg, &pair_key) == 1_000, 3);
         ts::return_to_sender(&mut sc, cap);
         ts::return_shared(cfg);
     };

@@ -1,9 +1,9 @@
 import { createClient, loadKeypair } from './client.ts';
-import { getBigInt, loadBenchEnv, requireReadyForBids } from './env.ts';
+import { getBigInt, loadBenchEnv, requireReadyForSettlement } from './env.ts';
 import { registerSolver } from './core.ts';
 
 const env = loadBenchEnv();
-requireReadyForBids(env);
+requireReadyForSettlement(env);
 const client = createClient(env);
 const keypair = await loadKeypair();
 const stake = getBigInt('STAKE_AMOUNT', 2_000_000_000n);

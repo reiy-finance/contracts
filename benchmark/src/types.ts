@@ -10,7 +10,7 @@ export type BenchEnv = {
   auctionStateId: string;
   globalConfigId: string;
   solverRegistryId: string;
-  protocolTreasuryId: string;
+  feeVaultId: string;
   stakeType: string;
   baseType: string;
   quoteType: string;
@@ -18,6 +18,7 @@ export type BenchEnv = {
   deepbookPackageId: string;
   deepbookRegistryId: string;
   clockId: string;
+  coordinatorKeyVersion: string;
   gasBudget: bigint;
   reportsDir: string;
 };
@@ -60,31 +61,36 @@ export type IntentRecord = TxRecord & {
   deadline: string;
 };
 
-export type BidPlan = {
+export type SolutionPlan = {
   index: number;
+  solutionId: string;
+  solver: string;
+  sellType: string;
+  buyType: string;
+  epoch: string;
   intentIds: string[];
   fills: string[];
-  payouts: string[];
-  declaredMulti: boolean;
-  score: string;
+  grossPayouts: string[];
+  protectedMins: string[];
+  expiresAtMs: string;
 };
 
-export type BidRecord = TxRecord & {
-  bidSeq?: string;
+export type SolutionCertificate = SolutionPlan & {
+  signatureHex: string;
+  messageBcsHex: string;
+};
+
+export type SettlementBatchRecord = TxRecord & {
+  solutionId: string;
   intentCount: number;
-  score: string;
-  stakeReserved?: string;
-};
-
-export type SelectionRecord = TxRecord & {
-  bidSeqs?: string[];
-  totalScore?: string;
-  bidCount?: number;
+  grossPayoutMist: string;
+  protectedMinMist: string;
+  estimatedProtocolFeeMist: string;
+  estimatedSolverFeeMist: string;
 };
 
 export type SolverStake = {
   stake: string;
-  reserved: string;
   available: string;
 };
 
@@ -100,13 +106,15 @@ export type Summary = {
   errors: Record<string, number>;
 };
 
-export type BidBatchSummary = {
+export type SettlementBatchSummary = {
   op: string;
   batches: number;
   intents: number;
   batchSize: Stats;
   latencyPerIntentMs: Stats;
   gasPerIntentMist: Stats;
+  protocolFeePerIntentMist: Stats;
+  solverFeePerIntentMist: Stats;
 };
 
 export type Stats = {

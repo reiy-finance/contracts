@@ -22,7 +22,7 @@ export function loadBenchEnv(): BenchEnv {
     auctionStateId,
     globalConfigId,
     solverRegistryId: get('SOLVER_REGISTRY_ID'),
-    protocolTreasuryId: get('PROTOCOL_TREASURY_ID'),
+    feeVaultId: get('FEE_VAULT_ID', get('USDC_FEE_VAULT_ID')),
     stakeType: get('STAKE_TYPE', get('SUI_TYPE', '0x2::sui::SUI')),
     baseType: get('BASE_TYPE', get('SUI_TYPE', '0x2::sui::SUI')),
     quoteType: get('QUOTE_TYPE', get('USDC_TYPE', get('DBUSDC_TYPE'))),
@@ -30,6 +30,7 @@ export function loadBenchEnv(): BenchEnv {
     deepbookPackageId: get('DEEPBOOK_PACKAGE_ID', get('DEEPBOOK_PKG')),
     deepbookRegistryId: get('DEEPBOOK_REGISTRY'),
     clockId: get('CLOCK_ID', '0x6'),
+    coordinatorKeyVersion: get('COORDINATOR_KEY_VERSION', '1'),
     gasBudget: bigIntFromEnv('GAS_BUDGET', get('GAS_BUDGET', '500000000')),
     reportsDir: resolve(process.env.REPORTS_DIR ?? join(import.meta.dir, '..', 'reports')),
   };
@@ -43,9 +44,9 @@ export function getInt(name: string, fallback: number): number {
   return value;
 }
 
-export function getBidChunkConfig(defaultSize = 10, defaultMax = 10) {
-  const requested = getPositiveInt('BID_CHUNK_SIZE', defaultSize);
-  const max = getPositiveInt('BID_MAX_CHUNK_SIZE', defaultMax);
+export function getSettlementChunkConfig(defaultSize = 4, defaultMax = 4) {
+  const requested = getPositiveInt('SETTLEMENT_CHUNK_SIZE', defaultSize);
+  const max = getPositiveInt('SETTLEMENT_MAX_CHUNK_SIZE', defaultMax);
   return {
     requested,
     max,
@@ -74,15 +75,10 @@ export function getDirection(): Direction {
   return value;
 }
 
-export function requireReadyForBids(env: BenchEnv) {
+export function requireReadyForSettlement(env: BenchEnv) {
   if (!env.solverRegistryId) throw new Error('SOLVER_REGISTRY_ID is missing');
+  if (!env.feeVaultId) throw new Error('FEE_VAULT_ID is missing');
   if (!env.stakeType) throw new Error('STAKE_TYPE is missing');
-}
-
-export function requireReadyForReset(env: BenchEnv) {
-  requireReadyForBids(env);
-  if (!env.protocolTreasuryId) throw new Error('PROTOCOL_TREASURY_ID is missing');
-  if (!env.quoteType) throw new Error('QUOTE_TYPE/USDC_TYPE is missing');
 }
 
 export function publicEnv(env: BenchEnv) {
@@ -93,11 +89,12 @@ export function publicEnv(env: BenchEnv) {
     auctionStateId: env.auctionStateId,
     globalConfigId: env.globalConfigId,
     solverRegistryId: env.solverRegistryId,
-    protocolTreasuryId: env.protocolTreasuryId,
+    feeVaultId: env.feeVaultId,
     stakeType: env.stakeType,
     baseType: env.baseType,
     quoteType: env.quoteType,
     poolId: env.poolId,
+    coordinatorKeyVersion: env.coordinatorKeyVersion,
   };
 }
 

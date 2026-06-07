@@ -3,7 +3,6 @@
 /// Canonical event types. Emit functions are package-internal.
 module reiy::events;
 
-use reiy::types::PairKey;
 use std::type_name::TypeName;
 use sui::event;
 
@@ -59,41 +58,6 @@ public struct EpochAdvancedEvent has copy, drop {
     timestamp_ms: u64,
 }
 
-public struct BidSubmittedEvent has copy, drop {
-    bid_seq: u64,
-    solver: address,
-    epoch: u64,
-    scope_is_multi: bool,
-    score: u64,
-    stake_reserved: u64,
-    intent_count: u64,
-}
-
-public struct PairBenchmarkSubmittedEvent has copy, drop {
-    auctioneer: address,
-    epoch: u64,
-    pair: PairKey,
-    total_score: u64,
-    stake_reserved: u64,
-    bid_count: u64,
-}
-
-public struct AllocationSubmittedEvent has copy, drop {
-    allocation_idx: u64,
-    auctioneer: address,
-    epoch: u64,
-    total_score: u64,
-    stake_reserved: u64,
-    bid_count: u64,
-}
-
-public struct WinnerSelectedEvent has copy, drop {
-    epoch: u64,
-    committed_total_score: u64,
-    winner_intent_count: u64,
-    fallback: bool,
-}
-
 public struct SettlementEvent has copy, drop {
     intent_id: ID,
     solver: address,
@@ -103,14 +67,6 @@ public struct SettlementEvent has copy, drop {
     raw_surplus: u64,
     score_value: u64,
     settlement_type: u8,
-}
-
-public struct SettlementCompleteEventV3 has copy, drop {
-    epoch: u64,
-    actual_score_surplus: u64,
-    committed_score: u64,
-    settled_intent_count: u64,
-    settled_score_value_sum: u64,
 }
 
 public struct ProtocolFeeCollectedEvent has copy, drop {
@@ -128,32 +84,6 @@ public struct SolverDeregisteredEvent has copy, drop {
     returned_stake: u64,
 }
 
-public struct SolverSlashedEvent has copy, drop {
-    solver: address,
-    amount_slashed: u64,
-    reason: u8,
-}
-
-public struct StakeSlashDepositedEvent has copy, drop {
-    epoch: u64,
-    amount: u64,
-}
-
-public struct ProtocolFeeWithdrawnEvent has copy, drop {
-    admin: address,
-    amount: u64,
-}
-
-public struct SlashedStakeWithdrawnEvent has copy, drop {
-    admin: address,
-    amount: u64,
-}
-
-public struct FallbackTriggeredEvent has copy, drop {
-    epoch: u64,
-    requeued_intent_count: u64,
-}
-
 public struct ConfigUpdatedEvent has copy, drop {
     key: vector<u8>,
     old_value: u64,
@@ -166,12 +96,6 @@ public struct RoleRevokedEvent has copy, drop { member: address, role: u64 }
 public struct FeeVaultRegisteredEvent has copy, drop {
     token_type: TypeName,
     vault_id: ID,
-}
-
-public struct PairFeeTierUpdatedEvent has copy, drop {
-    pair_sell_type: TypeName,
-    pair_buy_type: TypeName,
-    tier_tag: u8, // 0=Standard, 1=Correlated, 2=Custom, 3=Disabled
 }
 
 public struct SettlementFeeChargedEvent has copy, drop {
@@ -197,23 +121,22 @@ public struct BatchFeeSummaryEvent has copy, drop {
     settled_intent_count: u64,
 }
 
-public struct SolverRewardPaidEvent has copy, drop {
+public struct SolverFeePaidEvent has copy, drop {
     epoch: u64,
     solver: address,
-    reward_amount: u64,
-    performance_excess: u64,
-    reward_cap: u64,
+    amount: u64,
     fee_token: TypeName,
 }
 
-/// Emitted when an earned solver reward could not be paid because the fee vault was short
-/// (e.g. fees withdrawn between settlement and close). Makes the omission observable on-chain.
-public struct SolverRewardSkippedEvent has copy, drop {
+public struct SolutionAuthorizedEvent has copy, drop {
     epoch: u64,
+    solution_id: vector<u8>,
     solver: address,
-    owed_amount: u64,
-    vault_balance: u64,
-    fee_token: TypeName,
+    intent_count: u64,
+}
+
+public struct ExecutionCoordinatorUpdatedEvent has copy, drop {
+    key_version: u64,
 }
 
 // === Emit functions ===
@@ -283,76 +206,6 @@ public(package) fun emit_epoch_advanced(epoch: u64, phase: u8, timestamp_ms: u64
     event::emit(EpochAdvancedEvent { epoch, phase, timestamp_ms });
 }
 
-public(package) fun emit_bid_submitted(
-    bid_seq: u64,
-    solver: address,
-    epoch: u64,
-    scope_is_multi: bool,
-    score: u64,
-    stake_reserved: u64,
-    intent_count: u64,
-) {
-    event::emit(BidSubmittedEvent {
-        bid_seq,
-        solver,
-        epoch,
-        scope_is_multi,
-        score,
-        stake_reserved,
-        intent_count,
-    });
-}
-
-public(package) fun emit_pair_benchmark_submitted(
-    auctioneer: address,
-    epoch: u64,
-    pair: PairKey,
-    total_score: u64,
-    stake_reserved: u64,
-    bid_count: u64,
-) {
-    event::emit(PairBenchmarkSubmittedEvent {
-        auctioneer,
-        epoch,
-        pair,
-        total_score,
-        stake_reserved,
-        bid_count,
-    });
-}
-
-public(package) fun emit_allocation_submitted(
-    allocation_idx: u64,
-    auctioneer: address,
-    epoch: u64,
-    total_score: u64,
-    stake_reserved: u64,
-    bid_count: u64,
-) {
-    event::emit(AllocationSubmittedEvent {
-        allocation_idx,
-        auctioneer,
-        epoch,
-        total_score,
-        stake_reserved,
-        bid_count,
-    });
-}
-
-public(package) fun emit_winner_selected(
-    epoch: u64,
-    committed_total_score: u64,
-    winner_intent_count: u64,
-    fallback: bool,
-) {
-    event::emit(WinnerSelectedEvent {
-        epoch,
-        committed_total_score,
-        winner_intent_count,
-        fallback,
-    });
-}
-
 public(package) fun emit_settlement(
     intent_id: ID,
     solver: address,
@@ -375,36 +228,8 @@ public(package) fun emit_settlement(
     });
 }
 
-public(package) fun emit_settlement_complete(
-    epoch: u64,
-    actual_score_surplus: u64,
-    committed_score: u64,
-    settled_intent_count: u64,
-    settled_score_value_sum: u64,
-) {
-    event::emit(SettlementCompleteEventV3 {
-        epoch,
-        actual_score_surplus,
-        committed_score,
-        settled_intent_count,
-        settled_score_value_sum,
-    });
-}
-
 public(package) fun emit_protocol_fee_collected(epoch: u64, amount: u64) {
     event::emit(ProtocolFeeCollectedEvent { epoch, amount });
-}
-
-public(package) fun emit_stake_slash_deposited(epoch: u64, amount: u64) {
-    event::emit(StakeSlashDepositedEvent { epoch, amount });
-}
-
-public(package) fun emit_protocol_fee_withdrawn(admin: address, amount: u64) {
-    event::emit(ProtocolFeeWithdrawnEvent { admin, amount });
-}
-
-public(package) fun emit_slashed_stake_withdrawn(admin: address, amount: u64) {
-    event::emit(SlashedStakeWithdrawnEvent { admin, amount });
 }
 
 public(package) fun emit_solver_registered(solver: address, stake_amount: u64) {
@@ -413,14 +238,6 @@ public(package) fun emit_solver_registered(solver: address, stake_amount: u64) {
 
 public(package) fun emit_solver_deregistered(solver: address, returned_stake: u64) {
     event::emit(SolverDeregisteredEvent { solver, returned_stake });
-}
-
-public(package) fun emit_solver_slashed(solver: address, amount_slashed: u64, reason: u8) {
-    event::emit(SolverSlashedEvent { solver, amount_slashed, reason });
-}
-
-public(package) fun emit_fallback_triggered(epoch: u64, requeued_intent_count: u64) {
-    event::emit(FallbackTriggeredEvent { epoch, requeued_intent_count });
 }
 
 public(package) fun emit_config_updated(key: vector<u8>, old_value: u64, new_value: u64) {
@@ -485,36 +302,24 @@ public(package) fun emit_batch_fee_summary(
     });
 }
 
-public(package) fun emit_solver_reward_paid(
+public(package) fun emit_solver_fee_paid(
     epoch: u64,
     solver: address,
-    reward_amount: u64,
-    performance_excess: u64,
-    reward_cap: u64,
+    amount: u64,
     fee_token: TypeName,
 ) {
-    event::emit(SolverRewardPaidEvent {
-        epoch,
-        solver,
-        reward_amount,
-        performance_excess,
-        reward_cap,
-        fee_token,
-    });
+    event::emit(SolverFeePaidEvent { epoch, solver, amount, fee_token });
 }
 
-public(package) fun emit_solver_reward_skipped(
+public(package) fun emit_solution_authorized(
     epoch: u64,
+    solution_id: vector<u8>,
     solver: address,
-    owed_amount: u64,
-    vault_balance: u64,
-    fee_token: TypeName,
+    intent_count: u64,
 ) {
-    event::emit(SolverRewardSkippedEvent {
-        epoch,
-        solver,
-        owed_amount,
-        vault_balance,
-        fee_token,
-    });
+    event::emit(SolutionAuthorizedEvent { epoch, solution_id, solver, intent_count });
+}
+
+public(package) fun emit_execution_coordinator_updated(key_version: u64) {
+    event::emit(ExecutionCoordinatorUpdatedEvent { key_version });
 }

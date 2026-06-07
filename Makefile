@@ -5,7 +5,7 @@
 #   make build              — compile package
 #   make test               — run full test suite
 #   make deploy-testnet     — publish to testnet and save IDs to .env.testnet
-#   make setup-testnet      — init registry/treasury + supported pairs on testnet
+#   make setup-testnet      — init registry/fee vault/coordinator + pairs on testnet
 #   make verify-testnet     — check deployed objects exist with correct types
 #   make deploy-mainnet     — publish to mainnet (requires confirmation)
 #   make setup-mainnet      — post-deploy mainnet setup
@@ -49,7 +49,7 @@ help:
 	@echo "  make lint               build with linter warnings visible"
 	@echo ""
 	@echo "  make deploy-testnet     publish to testnet → saves IDs to .env.testnet"
-	@echo "  make setup-testnet      init registry/treasury + pairs + numeraire on testnet"
+	@echo "  make setup-testnet      init registry/fee vault/coordinator + pairs on testnet"
 	@echo "  make verify-testnet     verify deployed objects on testnet"
 	@echo ""
 	@echo "  make deploy-mainnet     publish to mainnet (prompts for confirmation)"

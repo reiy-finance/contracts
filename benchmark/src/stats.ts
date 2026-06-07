@@ -1,4 +1,4 @@
-import type { BidBatchSummary, BidRecord, Stats, Summary, TxRecord } from './types.ts';
+import type { SettlementBatchRecord, SettlementBatchSummary, Stats, Summary, TxRecord } from './types.ts';
 
 export function summarize(op: string, records: TxRecord[], wallMs: number): Summary {
   const success = records.filter((r) => r.status === 'success').length;
@@ -15,7 +15,7 @@ export function summarize(op: string, records: TxRecord[], wallMs: number): Summ
     wallMs,
     throughputPerSec: wallMs > 0 ? (success * 1000) / wallMs : 0,
     latencyMs: stats(records.map((r) => r.latencyMs)),
-    gasMist: stats(records.map((r) => Number(r.gasMist ?? 0)).filter((n) => n > 0)),
+    gasMist: stats(records.map(netGasMist).filter((n): n is number => n != null)),
     errors,
   };
 }
@@ -30,15 +30,17 @@ export function summarizeByOp(records: TxRecord[], wallMs: number): Record<strin
   return Object.fromEntries([...groups.entries()].map(([op, rows]) => [op, summarize(op, rows, wallMs)]));
 }
 
-export function summarizeBidBatches(records: BidRecord[]): BidBatchSummary {
+export function summarizeSettlementBatches(records: SettlementBatchRecord[]): SettlementBatchSummary {
   const success = records.filter((record) => record.status === 'success' && record.intentCount > 0);
   return {
-    op: 'submit_bid_batch',
+    op: 'settle_solution_batch',
     batches: success.length,
     intents: success.reduce((sum, record) => sum + record.intentCount, 0),
     batchSize: stats(success.map((record) => record.intentCount)),
     latencyPerIntentMs: stats(success.map((record) => record.latencyMs / record.intentCount)),
-    gasPerIntentMist: stats(success.map((record) => Number(record.gasMist ?? 0) / record.intentCount).filter((value) => value > 0)),
+    gasPerIntentMist: stats(success.map((record) => (netGasMist(record) ?? 0) / record.intentCount)),
+    protocolFeePerIntentMist: stats(success.map((record) => Number(record.estimatedProtocolFeeMist) / record.intentCount)),
+    solverFeePerIntentMist: stats(success.map((record) => Number(record.estimatedSolverFeeMist) / record.intentCount)),
   };
 }
 
@@ -61,4 +63,10 @@ function percentile(sorted: number[], p: number) {
   if (sorted.length === 0) return 0;
   const idx = Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1);
   return sorted[idx]!;
+}
+
+function netGasMist(record: TxRecord): number | undefined {
+  if (record.gasMist != null) return Number(record.gasMist);
+  if (record.computationCost == null && record.storageCost == null && record.storageRebate == null) return undefined;
+  return Number(BigInt(record.computationCost ?? 0) + BigInt(record.storageCost ?? 0) - BigInt(record.storageRebate ?? 0));
 }

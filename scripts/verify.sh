@@ -29,7 +29,7 @@ echo "=== REIY Object Verification (${ENV_FILE}) ==="
 check_object "AuctionState"       "${AUCTION_STATE_ID:-}"    "AuctionState"
 check_object "GlobalConfig"       "${GLOBAL_CONFIG_ID:-}"    "GlobalConfig"
 check_object "SolverRegistry"     "${SOLVER_REGISTRY_ID:-}"  "SolverRegistry"
-check_object "ProtocolTreasury"   "${PROTOCOL_TREASURY_ID:-}" "ProtocolTreasury"
+check_object "FeeVault"           "${FEE_VAULT_ID:-}"        "FeeVault"
 echo ""
 echo "Passed: $ok  Failed: $fail"
 [[ $fail -eq 0 ]]

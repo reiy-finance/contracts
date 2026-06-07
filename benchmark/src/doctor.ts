@@ -48,6 +48,7 @@ async function checkObjects() {
     auctionState: env.auctionStateId,
     globalConfig: env.globalConfigId,
     solverRegistry: env.solverRegistryId,
+    feeVault: env.feeVaultId,
   };
   const out: Record<string, unknown> = {};
   for (const [name, objectId] of Object.entries(entries)) {

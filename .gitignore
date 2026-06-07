@@ -8,3 +8,5 @@ Pub.*.toml
 .env
 .env.local
 package_summaries/
+__pycache__/
+*.pyc

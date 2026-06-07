@@ -1,44 +1,45 @@
 import { join } from 'node:path';
-import { createClient, loadKeypair } from './client.ts';
-import { getBidChunkConfig, getBigInt, getBool, getDirection, getInt, loadBenchEnv, publicEnv, requireReadyForBids } from './env.ts';
+import { createClient, loadCoordinatorKeypair, loadKeypair } from './client.ts';
 import {
-  advancePhase,
-  makeBidPlans,
+  getBigInt,
+  getBool,
+  getDirection,
+  getInt,
+  getSettlementChunkConfig,
+  loadBenchEnv,
+  publicEnv,
+  requireReadyForSettlement,
+} from './env.ts';
+import {
   makeIntentPlans,
+  makeSolutionPlans,
   readSolverStake,
   registerSolver,
-  submitAllocation,
-  submitBid,
+  settleSolution,
   submitIntent,
-  submitPairBenchmark,
   topUpStake,
 } from './core.ts';
+import { signSolutionCertificate } from './certificate.ts';
 import { createRunDir, writeJson, writeRun, type RunFile } from './report.ts';
-import { summarize, summarizeBidBatches, summarizeByOp } from './stats.ts';
-import type { BidRecord, IntentRecord, SelectionRecord, TxRecord } from './types.ts';
+import { summarize, summarizeByOp, summarizeSettlementBatches } from './stats.ts';
+import type { IntentRecord, SettlementBatchRecord, TxRecord } from './types.ts';
 
 const env = loadBenchEnv();
-requireReadyForBids(env);
+requireReadyForSettlement(env);
 const minE2eGasBudget = getBigInt('E2E_GAS_BUDGET', 2_000_000_000n);
 if (env.gasBudget < minE2eGasBudget) env.gasBudget = minE2eGasBudget;
 
 const client = createClient(env);
 const keypair = await loadKeypair();
+const coordinator = await loadCoordinatorKeypair();
 const { runId, runDir } = createRunDir(env.reportsDir, 'e2e');
 
 const count = getInt('COUNT', getInt('BENCH_COUNT', 100));
-const bidChunk = getBidChunkConfig();
-const bidChunkSize = bidChunk.effective;
-const payoutMultiplier = BigInt(getInt('BID_PAYOUT_MULTIPLIER', 1));
+const chunk = getSettlementChunkConfig();
 const autoRegister = getBool('AUTO_REGISTER', true);
-const fullSelection = getBool('FULL_SELECTION', true);
-const bidWaitMs = getInt('BID_WAIT_MS', 5500);
-const selectionWaitMs = getInt('SELECTION_WAIT_MS', 5500);
-const stakeReserveUnit = getBigInt('STAKE_RESERVE_UNIT', 1_000_000_000n);
-const estimatedReserveCount = BigInt(Math.ceil(count / bidChunkSize) + (fullSelection ? 2 : 0));
-const estimatedStakeAmount = stakeReserveUnit * estimatedReserveCount;
-const stakeAmount = getBigInt('STAKE_AMOUNT', estimatedStakeAmount);
 const autoTopUp = getBool('AUTO_TOP_UP', true);
+const stakeAmount = getBigInt('STAKE_AMOUNT', 2_000_000_000n);
+const grossPayoutBps = BigInt(getInt('GROSS_PAYOUT_BPS', 10_100));
 
 const intentPlans = makeIntentPlans(env, {
   count,
@@ -54,15 +55,15 @@ const intentPlans = makeIntentPlans(env, {
 const startedAt = new Date();
 const records: TxRecord[] = [];
 const intentRecords: IntentRecord[] = [];
-const bidRecords: BidRecord[] = [];
-const selectionRecords: SelectionRecord[] = [];
+const settlementRecords: SettlementBatchRecord[] = [];
+const certificates = [];
 
 console.log(`run: ${runId}`);
 console.log(`signer: ${keypair.toSuiAddress()}`);
+console.log(`coordinator: ${coordinator.toSuiAddress()}`);
 console.log(`package: ${env.packageId}`);
 console.log(`intents: ${count}`);
-console.log(`bid chunk size: ${bidChunkSize}${bidChunk.capped ? ` (capped from ${bidChunk.requested})` : ''}`);
-console.log(`estimated stake needed: ${estimatedStakeAmount}`);
+console.log(`settlement chunk size: ${chunk.effective}${chunk.capped ? ` (capped from ${chunk.requested})` : ''}`);
 
 if (autoRegister) {
   const { record } = await registerSolver(client, keypair, env, stakeAmount, process.env.SOLVER_URL ?? 'benchmark://e2e');
@@ -75,7 +76,7 @@ if (autoRegister) {
   }
 }
 
-await writeJson(join(runDir, 'plan.json'), { intents: intentPlans });
+await writeJson(join(runDir, 'plan.json'), { intents: intentPlans, settlementChunk: chunk });
 
 for (const plan of intentPlans) {
   const record = await submitIntent(client, keypair, env, plan);
@@ -85,75 +86,49 @@ for (const plan of intentPlans) {
   console.log(`[intent ${record.index}/${intentPlans.length}] ${record.status} ${record.latencyMs.toFixed(0)}ms gas=${record.gasMist ?? '-'} ${record.intentId ?? record.error ?? ''}`);
 }
 
-let advance = await advancePhase(client, keypair, env, 1);
-advance.record.op = 'advance_to_bid';
-records.push(advance.record);
-await writeJson(join(runDir, 'records.json'), records);
-console.log(`[advance_to_bid] ${advance.record.status} ${advance.record.error ?? ''}`);
-
-const bidPlans = makeBidPlans(intentRecords, bidChunkSize, payoutMultiplier);
-await writeJson(join(runDir, 'plan.json'), { intents: intentPlans, bids: bidPlans, bidChunk });
-
-if (autoTopUp && bidPlans.length > 0) {
-  const requiredStake = stakeReserveUnit * BigInt(bidPlans.length + (fullSelection ? 2 : 0));
+if (autoTopUp) {
   const stake = await readSolverStake(client, keypair, env).catch((error) => {
     console.log(`[stake] read failed ${error instanceof Error ? error.message : String(error)}`);
     return null;
   });
-  if (stake) {
-    const available = BigInt(stake.available);
-    console.log(`[stake] total=${stake.stake} reserved=${stake.reserved} available=${stake.available} required=${requiredStake}`);
-    if (available < requiredStake) {
-      const deficit = requiredStake - available;
-      const { record } = await topUpStake(client, keypair, env, deficit);
-      records.push(record);
-      await writeJson(join(runDir, 'records.json'), records);
-      console.log(`[top_up_stake] ${record.status} amount=${deficit} gas=${record.gasMist ?? '-'} ${record.error ?? ''}`);
-    }
+  if (stake && BigInt(stake.available) < stakeAmount) {
+    const deficit = stakeAmount - BigInt(stake.available);
+    const { record } = await topUpStake(client, keypair, env, deficit);
+    records.push(record);
+    await writeJson(join(runDir, 'records.json'), records);
+    console.log(`[top_up_stake] ${record.status} amount=${deficit} gas=${record.gasMist ?? '-'} ${record.error ?? ''}`);
   }
 }
 
-for (const plan of bidPlans) {
-  const record = await submitBid(client, keypair, env, plan);
-  bidRecords.push(record);
+const solutionPlans = makeSolutionPlans(intentRecords, {
+  solver: keypair.toSuiAddress(),
+  chunkSize: chunk.effective,
+  grossPayoutBps,
+  expiresInMs: getInt('SOLUTION_TTL_MS', 300_000),
+  runId,
+});
+await writeJson(join(runDir, 'plan.json'), { intents: intentPlans, solutions: solutionPlans, settlementChunk: chunk });
+
+for (const plan of solutionPlans) {
+  const signStart = performance.now();
+  const certificate = await signSolutionCertificate(env, coordinator, plan);
+  records.push({
+    index: plan.index,
+    op: 'coordinator_sign_solution',
+    status: 'success',
+    latencyMs: performance.now() - signStart,
+  });
+  certificates.push(certificate);
+  await writeJson(join(runDir, 'certificates.json'), certificates);
+
+  const record = await settleSolution(client, keypair, env, certificate);
+  settlementRecords.push(record);
   records.push(record);
   await writeJson(join(runDir, 'records.json'), records);
-  console.log(`[bid ${record.index}/${bidPlans.length}] ${record.status} intents=${record.intentCount} ${record.latencyMs.toFixed(0)}ms gas=${record.gasMist ?? '-'} ${record.bidSeq ?? record.error ?? ''}`);
-}
-
-if (fullSelection && bidPlans.length > 0) {
-  console.log(`wait ${bidWaitMs}ms for bid window`);
-  await Bun.sleep(bidWaitMs);
-
-  advance = await advancePhase(client, keypair, env, 2);
-  advance.record.op = 'advance_to_selection';
-  records.push(advance.record);
-  await writeJson(join(runDir, 'records.json'), records);
-  console.log(`[advance_to_selection] ${advance.record.status} ${advance.record.error ?? ''}`);
-
-  const bidSeqs = bidRecords.map((record, index) => record.bidSeq ?? String(index));
-  const totalScore = bidPlans.reduce((sum, plan) => sum + BigInt(plan.score), 0n).toString();
-
-  const benchmarkRecord = await submitPairBenchmark(client, keypair, env, bidSeqs, 1);
-  selectionRecords.push(benchmarkRecord);
-  records.push(benchmarkRecord);
-  await writeJson(join(runDir, 'records.json'), records);
-  console.log(`[pair_benchmark] ${benchmarkRecord.status} bids=${benchmarkRecord.bidCount ?? bidSeqs.length} gas=${benchmarkRecord.gasMist ?? '-'} ${benchmarkRecord.error ?? ''}`);
-
-  const allocationRecord = await submitAllocation(client, keypair, env, bidSeqs, totalScore, 1);
-  selectionRecords.push(allocationRecord);
-  records.push(allocationRecord);
-  await writeJson(join(runDir, 'records.json'), records);
-  console.log(`[allocation] ${allocationRecord.status} bids=${allocationRecord.bidCount ?? bidSeqs.length} gas=${allocationRecord.gasMist ?? '-'} ${allocationRecord.error ?? ''}`);
-
-  console.log(`wait ${selectionWaitMs}ms for selection window`);
-  await Bun.sleep(selectionWaitMs);
-
-  advance = await advancePhase(client, keypair, env, 3);
-  advance.record.op = 'advance_to_settlement';
-  records.push(advance.record);
-  await writeJson(join(runDir, 'records.json'), records);
-  console.log(`[advance_to_settlement] ${advance.record.status} ${advance.record.error ?? ''}`);
+  console.log(
+    `[settle ${record.index}/${solutionPlans.length}] ${record.status} intents=${record.intentCount} ` +
+      `${record.latencyMs.toFixed(0)}ms gas=${record.gasMist ?? '-'} ${record.digest ?? record.error ?? ''}`,
+  );
 }
 
 const finishedAt = new Date();
@@ -166,14 +141,14 @@ const run: RunFile<TxRecord> = {
   env: publicEnv(env),
   plans: {
     intents: intentPlans,
-    bids: bidPlans,
-    bidChunk,
-    fullSelection,
+    solutions: solutionPlans,
+    settlementChunk: chunk,
+    grossPayoutBps: grossPayoutBps.toString(),
   },
   records,
   summary: summarize('e2e', records, wallMs),
   summaries: summarizeByOp(records, wallMs),
-  bidBatchSummary: summarizeBidBatches(bidRecords),
+  settlementBatchSummary: summarizeSettlementBatches(settlementRecords),
 };
 
 await writeRun(runDir, run);

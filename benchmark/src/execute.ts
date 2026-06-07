@@ -105,12 +105,13 @@ function getError(result: any): string | undefined {
 function gasFields(result: any) {
   const tx = getTx(result);
   const gas = tx?.effects?.gasUsed ?? result?.effects?.gasUsed ?? {};
+  const hasGas = gas.computationCost != null || gas.storageCost != null || gas.storageRebate != null;
   const computation = bigintish(gas.computationCost);
   const storage = bigintish(gas.storageCost);
   const rebate = bigintish(gas.storageRebate);
   const total = computation + storage - rebate;
   return {
-    gasMist: total > 0n ? total.toString() : undefined,
+    gasMist: hasGas ? total.toString() : undefined,
     computationCost: gas.computationCost?.toString(),
     storageCost: gas.storageCost?.toString(),
     storageRebate: gas.storageRebate?.toString(),

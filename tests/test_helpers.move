@@ -10,12 +10,14 @@ use reiy::config::{Self, GlobalConfig, AdminCap};
 use reiy::auction;
 use reiy::fee_vault;
 use reiy::solver_registry;
-use reiy::treasury;
 
 // === Marker coin types ===
 public struct USDC has drop {} // protocol numeraire
 public struct TOKA has drop {}
 public struct TOKB has drop {}
+
+const COORDINATOR_PUBKEY: vector<u8> =
+    x"0101010101010101010101010101010101010101010101010101010101010101";
 
 public fun k(): u64 { 1_000_000_000 }
 
@@ -47,9 +49,8 @@ public fun setup_all(scenario: &mut Scenario, admin: address) {
         config::add_supported_pair<TOKA, USDC>(&mut cfg, &cap);
         config::add_supported_pair<TOKB, USDC>(&mut cfg, &cap);
         let registry_id = solver_registry::init_for_testing<SUI>(&cap, ts::ctx(scenario));
-        let treasury_id = treasury::init_treasury<USDC, SUI>(&cfg, &cap, ts::ctx(scenario));
         config::set_solver_registry_id(&mut cfg, registry_id, &cap);
-        config::set_protocol_treasury_id(&mut cfg, treasury_id, &cap);
+        config::set_execution_coordinator(&mut cfg, COORDINATOR_PUBKEY, 1, &cap);
         // Create and register the canonical FeeVault<USDC>
         let vault_id = fee_vault::init_fee_vault<USDC>(&cap, ts::ctx(scenario));
         config::register_fee_vault<USDC>(&mut cfg, vault_id, &cap);

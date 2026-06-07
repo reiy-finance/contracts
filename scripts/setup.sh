@@ -58,6 +58,71 @@ run_ptb() {
   done
 }
 
+hex_to_u8_array() {
+  local hex=${1#0x}
+  hex=${hex#0X}
+
+  if [[ "${#hex}" -ne 64 ]]; then
+    echo "ERROR: COORDINATOR_PUBKEY must be a 32-byte hex string" >&2
+    exit 1
+  fi
+
+  local bytes=()
+  local i
+  for ((i = 0; i < ${#hex}; i += 2)); do
+    bytes+=("$((16#${hex:i:2}))")
+  done
+
+  local IFS=,
+  printf '[%s]' "${bytes[*]}"
+}
+
+decode_public_key_hex() {
+  local encoded=$1
+  local hex
+  hex=$(
+    (
+      printf "%s" "$encoded" | base64 --decode 2>/dev/null \
+        || printf "%s" "$encoded" | base64 -D 2>/dev/null
+    ) | od -An -tx1 -v | tr -d ' \n'
+  )
+
+  if [[ "${#hex}" -eq 66 ]]; then
+    hex=${hex:2}
+  fi
+
+  if [[ "${#hex}" -ne 64 ]]; then
+    echo "ERROR: could not decode a 32-byte Ed25519 public key from Sui keytool output" >&2
+    exit 1
+  fi
+
+  printf "%s" "$hex"
+}
+
+derive_active_coordinator_pubkey() {
+  local active
+  active=$(sui client active-address)
+
+  local encoded
+  encoded=$(
+    sui keytool list --json \
+      | jq -r --arg active "$active" '
+          .[]
+          | select(.suiAddress == $active)
+          | select(.keyScheme == "ed25519")
+          | .publicBase64Key
+        ' \
+      | head -1
+  )
+
+  if [[ -z "$encoded" || "$encoded" == "null" ]]; then
+    echo "ERROR: COORDINATOR_PUBKEY is not set and active Sui CLI key is not Ed25519" >&2
+    exit 1
+  fi
+
+  decode_public_key_hex "$encoded"
+}
+
 echo "=== REIY Setup ==="
 echo "Package : $REIY_PACKAGE_ID"
 echo "Config  : $GLOBAL_CONFIG_ID"
@@ -119,48 +184,64 @@ else
 fi
 
 echo ""
-TREASURY_ID=${PROTOCOL_TREASURY_ID:-}
-TREASURY_CREATED=0
-if [[ -n "$TREASURY_ID" ]]; then
-  echo "Step 3: use ProtocolTreasury ${TREASURY_ID}"
+FEE_VAULT_ID=${FEE_VAULT_ID:-}
+FEE_VAULT_CREATED=0
+if [[ -n "$FEE_VAULT_ID" ]]; then
+  echo "Step 3: use FeeVault ${FEE_VAULT_ID}"
 else
-  echo "Step 3: init_treasury<${USDC_TYPE},${STAKE_TYPE}> ..."
-  TREASURY_OUTPUT=$(
+  echo "Step 3: init_fee_vault<${USDC_TYPE}> ..."
+  FEE_VAULT_OUTPUT=$(
     run_ptb \
-      --move-call "${REIY_PACKAGE_ID}::treasury::init_treasury<${USDC_TYPE},${STAKE_TYPE}>" \
-        "@${GLOBAL_CONFIG_ID}" "@${ADMIN_CAP_ID}" \
+      --move-call "${REIY_PACKAGE_ID}::fee_vault::init_fee_vault<${USDC_TYPE}>" \
+        "@${ADMIN_CAP_ID}" \
       --gas-budget "${GAS_BUDGET}" \
       --json 2>&1
   ) || {
-    echo "$TREASURY_OUTPUT" >&2
+    echo "$FEE_VAULT_OUTPUT" >&2
     exit 1
   }
-  echo "$TREASURY_OUTPUT" | tee /tmp/reiy_treasury_deploy.json
+  echo "$FEE_VAULT_OUTPUT" | tee /tmp/reiy_fee_vault_deploy.json
 
-  TREASURY_ID=$(echo "$TREASURY_OUTPUT" | jq -r '
+  FEE_VAULT_ID=$(echo "$FEE_VAULT_OUTPUT" | jq -r '
     .objectChanges[]
     | select(.type == "created")
-    | select(.objectType | test("ProtocolTreasury"))
+    | select(.objectType | test("FeeVault"))
     | .objectId
   ' | head -1)
 
-  if [[ -z "$TREASURY_ID" ]]; then
-    echo "ERROR: could not extract ProtocolTreasury ID" >&2
+  if [[ -z "$FEE_VAULT_ID" ]]; then
+    echo "ERROR: could not extract FeeVault ID" >&2
     exit 1
   fi
-  echo "ProtocolTreasury: $TREASURY_ID"
-  set_env_var PROTOCOL_TREASURY_ID "$TREASURY_ID"
-  TREASURY_CREATED=1
+  echo "FeeVault: $FEE_VAULT_ID"
+  set_env_var FEE_VAULT_ID "$FEE_VAULT_ID"
+  FEE_VAULT_CREATED=1
 fi
 
-if [[ "$TREASURY_CREATED" -eq 1 || "${REBIND_CANONICAL_IDS:-0}" == "1" ]]; then
+if [[ "$FEE_VAULT_CREATED" -eq 1 || "${REBIND_CANONICAL_IDS:-0}" == "1" ]]; then
   run_ptb \
-    --move-call "${REIY_PACKAGE_ID}::config::set_protocol_treasury_id" \
-      "@${GLOBAL_CONFIG_ID}" "@${TREASURY_ID}" "@${ADMIN_CAP_ID}" \
+    --move-call "${REIY_PACKAGE_ID}::config::register_fee_vault<${USDC_TYPE}>" \
+      "@${GLOBAL_CONFIG_ID}" "@${FEE_VAULT_ID}" "@${ADMIN_CAP_ID}" \
     --gas-budget "${GAS_BUDGET}"
 else
-  echo "Step 3b: treasury binding already recorded"
+  echo "Step 3b: fee vault binding already recorded"
 fi
+
+echo ""
+COORDINATOR_KEY_VERSION=${COORDINATOR_KEY_VERSION:-1}
+if [[ -z "${COORDINATOR_PUBKEY:-}" || "${COORDINATOR_PUBKEY}" == "active" ]]; then
+  COORDINATOR_PUBKEY=$(derive_active_coordinator_pubkey)
+  set_env_var COORDINATOR_PUBKEY "$COORDINATOR_PUBKEY"
+fi
+COORDINATOR_PUBKEY_BYTES=$(hex_to_u8_array "$COORDINATOR_PUBKEY")
+echo "Step 4: set_execution_coordinator key version ${COORDINATOR_KEY_VERSION} ..."
+run_ptb \
+  --make-move-vec "<u8>" "${COORDINATOR_PUBKEY_BYTES}" \
+  --assign coordinator_pubkey \
+  --move-call "${REIY_PACKAGE_ID}::config::set_execution_coordinator" \
+    "@${GLOBAL_CONFIG_ID}" coordinator_pubkey "${COORDINATOR_KEY_VERSION}" "@${ADMIN_CAP_ID}" \
+  --gas-budget "${GAS_BUDGET}"
+set_env_var COORDINATOR_KEY_VERSION "$COORDINATOR_KEY_VERSION"
 
 add_numeraire_pool_if_set() {
   local token_label=$1
@@ -180,7 +261,7 @@ add_numeraire_pool_if_set() {
 }
 
 echo ""
-echo "Step 4: add_numeraire_pool ..."
+echo "Step 5: add_numeraire_pool ..."
 if [[ -n "${NUMERAIRE_POOLS:-}" ]]; then
   for ENTRY in $NUMERAIRE_POOLS; do
     if [[ "$ENTRY" == *"|"* ]]; then
@@ -198,13 +279,18 @@ if [[ -n "${NUMERAIRE_POOLS:-}" ]]; then
     add_numeraire_pool_if_set "$TOKEN_TYPE" "$TOKEN_TYPE" "$POOL_ID"
   done
 else
-  add_numeraire_pool_if_set "WSUI -> WUSDC" "${WSUI_TYPE:-}" "${DEEPBOOK_WSUI_WUSDC_POOL:-}"
-  add_numeraire_pool_if_set "WDEEP -> WUSDC" "${WDEEP_TYPE:-}" "${DEEPBOOK_WDEEP_WUSDC_POOL:-}"
+  if [[ -n "${WUSDC_TYPE:-}" && "${USDC_TYPE}" == "${WUSDC_TYPE}" ]]; then
+    add_numeraire_pool_if_set "WSUI -> WUSDC" "${WSUI_TYPE:-}" "${DEEPBOOK_WSUI_WUSDC_POOL:-}"
+    add_numeraire_pool_if_set "WDEEP -> WUSDC" "${WDEEP_TYPE:-}" "${DEEPBOOK_WDEEP_WUSDC_POOL:-}"
+    add_numeraire_pool_if_set "WUSDT -> WUSDC" "${WUSDT_TYPE:-}" "${DEEPBOOK_WUSDC_WUSDT_POOL:-}"
+  else
+    echo "  NUMERAIRE_POOLS not set -- skipping legacy WUSDC fallback for active numeraire ${USDC_TYPE}"
+  fi
 fi
 
-# ---- 5. add_supported_pairs ----
+# ---- 6. add_supported_pairs ----
 echo ""
-echo "Step 5: add_supported_pairs ..."
+echo "Step 6: add_supported_pairs ..."
 if [[ -z "${SUPPORTED_PAIRS:-}" ]]; then
   echo "SUPPORTED_PAIRS not set — skipping"
 else
@@ -226,10 +312,10 @@ else
       exit 1
     fi
 
-    # v1 is numeraire-only: add_supported_pair on-chain requires Buy == numeraire (audit F-009-1).
+    # v2 launch is numeraire-only: add_supported_pair on-chain requires Buy == numeraire.
     # Fail fast here with a clear message instead of aborting mid-setup with a raw Move abort.
     if [[ "$BUY" != "$USDC_TYPE" ]]; then
-      echo "ERROR: v1 numeraire-only — a supported pair's Buy token must be the numeraire." >&2
+      echo "ERROR: numeraire-only launch -- a supported pair's Buy token must be the numeraire." >&2
       echo "       numeraire (USDC_TYPE): ${USDC_TYPE}" >&2
       echo "       offending pair (Sell -> Buy): ${SELL} -> ${BUY}" >&2
       echo "       Remove non-numeraire-Buy pairs from SUPPORTED_PAIRS (e.g. the reverse USDC->X)." >&2
@@ -244,19 +330,20 @@ else
   done
 fi
 
-# ---- 6. (mainnet only) transfer AdminCap to multisig ----
+# ---- 7. (mainnet only) transfer AdminCap to multisig ----
 if [[ -n "${MULTISIG_ADDRESS:-}" ]]; then
   echo ""
-  echo "Step 6: Transferring AdminCap to multisig ${MULTISIG_ADDRESS} ..."
+  echo "Step 7: Transferring AdminCap to multisig ${MULTISIG_ADDRESS} ..."
   run_ptb \
     --transfer-objects "[@${ADMIN_CAP_ID}]" "@${MULTISIG_ADDRESS}" \
     --gas-budget "${GAS_BUDGET}"
   echo "✓ AdminCap transferred — you can no longer call setup again without multisig co-sign"
 else
-  echo "Step 6: MULTISIG_ADDRESS not set — AdminCap stays with deployer"
+  echo "Step 7: MULTISIG_ADDRESS not set -- AdminCap stays with deployer"
 fi
 
 echo ""
 echo "=== Setup complete ==="
 echo "SOLVER_REGISTRY_ID = $REGISTRY_ID"
-echo "PROTOCOL_TREASURY_ID = $TREASURY_ID"
+echo "FEE_VAULT_ID = $FEE_VAULT_ID"
+echo "COORDINATOR_KEY_VERSION = $COORDINATOR_KEY_VERSION"

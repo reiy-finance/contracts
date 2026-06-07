@@ -1,8 +1,20 @@
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import type { Keypair } from '@mysten/sui/cryptography';
+import { estimateFee, signatureBytes, solutionIdBytes } from './certificate.ts';
 import { eventData, executeTx, findEvent } from './execute.ts';
-import type { BenchEnv, BidPlan, BidRecord, Direction, IntentPlan, IntentRecord, SelectionRecord, SolverStake } from './types.ts';
+import type {
+  BenchEnv,
+  Direction,
+  IntentPlan,
+  IntentRecord,
+  SettlementBatchRecord,
+  SolutionCertificate,
+  SolutionPlan,
+  SolverStake,
+} from './types.ts';
+
+const decoder = new TextDecoder();
 
 export type IntentOptions = {
   count: number;
@@ -13,6 +25,14 @@ export type IntentOptions = {
   ttlMs: number;
   partialFillable: boolean;
   seed: number;
+};
+
+export type SolutionOptions = {
+  solver: string;
+  chunkSize: number;
+  grossPayoutBps: bigint;
+  expiresInMs: number;
+  runId: string;
 };
 
 export function makeIntentPlans(env: BenchEnv, options: IntentOptions): IntentPlan[] {
@@ -50,12 +70,14 @@ export async function submitIntent(
   const { record, result } = await executeTx(client, keypair, env, tx, 'submit_intent', plan.index);
   const event = findEvent(result, '::events::IntentCreatedEvent');
   const data = event ? eventData(event) : {};
+  const fallbackSell = plan.direction === 'base_to_quote' ? plan.baseType : plan.quoteType;
+  const fallbackBuy = plan.direction === 'base_to_quote' ? plan.quoteType : plan.baseType;
 
   return {
     ...record,
     intentId: valueOf(data.intent_id ?? data.intentId),
-    sellType: valueOf(data.sell_type ?? data.sellType),
-    buyType: valueOf(data.buy_type ?? data.buyType),
+    sellType: typeTag(valueOf(data.sell_type ?? data.sellType) ?? fallbackSell),
+    buyType: typeTag(valueOf(data.buy_type ?? data.buyType) ?? fallbackBuy),
     sellAmount: valueOf(data.sell_amount ?? data.sellAmount) ?? plan.sellAmount,
     minAmountOut: valueOf(data.min_amount_out ?? data.minAmountOut),
     sbboFloor: valueOf(data.sbbo_floor ?? data.sbboFloor),
@@ -109,30 +131,132 @@ export function buildSubmitIntentTx(env: BenchEnv, plan: IntentPlan) {
   return tx;
 }
 
-export async function advancePhase(client: SuiGrpcClient, keypair: Keypair, env: BenchEnv, index = 1) {
-  const tx = new Transaction();
-  tx.moveCall({
-    target: `${env.packageId}::auction::advance_phase`,
-    typeArguments: [env.stakeType],
-    arguments: [tx.object(env.auctionStateId), tx.object(env.solverRegistryId), tx.object(env.globalConfigId), tx.object(env.clockId)],
-  });
-  return executeTx(client, keypair, env, tx, 'advance_phase', index);
+export function makeSolutionPlans(intentRecords: IntentRecord[], options: SolutionOptions): SolutionPlan[] {
+  const usable = intentRecords.filter(
+    (record) =>
+      record.status === 'success' &&
+      record.intentId &&
+      record.sellType &&
+      record.buyType &&
+      record.sellAmount &&
+      record.minAmountOut &&
+      record.targetEpoch,
+  );
+  const groups = new Map<string, IntentRecord[]>();
+  for (const record of usable) {
+    const normalized = {
+      ...record,
+      sellType: typeTag(record.sellType)!,
+      buyType: typeTag(record.buyType)!,
+    };
+    const key = `${normalized.targetEpoch}|${normalized.sellType}|${normalized.buyType}`;
+    const group = groups.get(key) ?? [];
+    group.push(normalized);
+    groups.set(key, group);
+  }
+
+  const plans: SolutionPlan[] = [];
+  for (const rows of groups.values()) {
+    for (let i = 0; i < rows.length; i += options.chunkSize) {
+      const chunk = rows.slice(i, i + options.chunkSize);
+      const protectedMins = chunk.map((record) => BigInt(record.minAmountOut!));
+      const grossPayouts = protectedMins.map((amount) => {
+        const gross = (amount * options.grossPayoutBps) / 10000n;
+        return gross > amount ? gross : amount + 1n;
+      });
+      const index = plans.length + 1;
+      plans.push({
+        index,
+        solutionId: `${options.runId}-${index}`,
+        solver: options.solver,
+        sellType: chunk[0]!.sellType!,
+        buyType: chunk[0]!.buyType!,
+        epoch: chunk[0]!.targetEpoch!,
+        intentIds: chunk.map((record) => record.intentId!),
+        fills: chunk.map((record) => record.sellAmount),
+        grossPayouts: grossPayouts.map(String),
+        protectedMins: protectedMins.map(String),
+        expiresAtMs: String(Date.now() + options.expiresInMs),
+      });
+    }
+  }
+  return plans;
 }
 
-export async function triggerFallback(client: SuiGrpcClient, keypair: Keypair, env: BenchEnv, index = 1) {
+export async function settleSolution(
+  client: SuiGrpcClient,
+  keypair: Keypair,
+  env: BenchEnv,
+  certificate: SolutionCertificate,
+): Promise<SettlementBatchRecord> {
+  const tx = buildSettleSolutionTx(env, certificate);
+  const { record } = await executeTx(client, keypair, env, tx, 'settle_solution', certificate.index);
+  const gross = sum(certificate.grossPayouts);
+  const protectedMin = sum(certificate.protectedMins);
+  const fee = certificate.grossPayouts.reduce(
+    (acc, grossValue, index) => {
+      const row = estimateFee(BigInt(grossValue), BigInt(certificate.protectedMins[index]!));
+      acc.protocolFee += row.protocolFee;
+      acc.solverFee += row.solverFee;
+      return acc;
+    },
+    { protocolFee: 0n, solverFee: 0n },
+  );
+
+  return {
+    ...record,
+    solutionId: certificate.solutionId,
+    intentCount: certificate.intentIds.length,
+    grossPayoutMist: gross.toString(),
+    protectedMinMist: protectedMin.toString(),
+    estimatedProtocolFeeMist: fee.protocolFee.toString(),
+    estimatedSolverFeeMist: fee.solverFee.toString(),
+  };
+}
+
+export function buildSettleSolutionTx(env: BenchEnv, certificate: SolutionCertificate) {
   const tx = new Transaction();
-  tx.moveCall({
-    target: `${env.packageId}::settlement::trigger_fallback`,
-    typeArguments: [env.quoteType, env.stakeType],
+  const [auth] = tx.moveCall({
+    target: `${env.packageId}::settlement::verify_solution`,
+    typeArguments: [certificate.sellType, certificate.buyType],
     arguments: [
       tx.object(env.auctionStateId),
-      tx.object(env.solverRegistryId),
       tx.object(env.globalConfigId),
-      tx.object(env.protocolTreasuryId),
+      tx.pure.vector('u8', solutionIdBytes(certificate.solutionId)),
+      tx.pure.address(certificate.solver),
+      tx.pure.vector('address', certificate.intentIds),
+      tx.pure.vector('u64', certificate.fills),
+      tx.pure.vector('u64', certificate.grossPayouts),
+      tx.pure.vector('u64', certificate.protectedMins),
+      tx.pure.u64(certificate.expiresAtMs),
+      tx.pure.vector('u8', signatureBytes(certificate)),
       tx.object(env.clockId),
     ],
   });
-  return executeTx(client, keypair, env, tx, 'trigger_fallback', index);
+
+  for (let i = 0; i < certificate.intentIds.length; i += 1) {
+    const [sellCoin, receipt] = tx.moveCall({
+      target: `${env.packageId}::settlement::take_authorized_intent_full`,
+      typeArguments: [certificate.sellType, certificate.buyType],
+      arguments: [tx.object(env.auctionStateId), auth, tx.object(certificate.intentIds[i]!), tx.object(env.clockId)],
+    });
+    tx.transferObjects([sellCoin], tx.pure.address(certificate.solver));
+    const payout = tx.coin({ type: certificate.buyType, balance: BigInt(certificate.grossPayouts[i]!) });
+    tx.moveCall({
+      target: `${env.packageId}::settlement::settle_intent_numeraire`,
+      typeArguments: [certificate.sellType, certificate.buyType, env.stakeType],
+      arguments: [
+        tx.object(env.auctionStateId),
+        tx.object(env.solverRegistryId),
+        tx.object(env.globalConfigId),
+        tx.object(env.feeVaultId),
+        receipt,
+        payout,
+      ],
+    });
+  }
+
+  return tx;
 }
 
 export async function registerSolver(
@@ -178,7 +302,7 @@ export async function readSolverStake(client: SuiGrpcClient, keypair: Keypair, e
   const tx = new Transaction();
   const solver = keypair.toSuiAddress();
   tx.setSender(solver);
-  for (const fn of ['stake_of', 'reserved_stake_of', 'available_stake_of']) {
+  for (const fn of ['stake_of', 'available_stake_of']) {
     tx.moveCall({
       target: `${env.packageId}::solver_registry::${fn}`,
       typeArguments: [env.stakeType],
@@ -192,125 +316,7 @@ export async function readSolverStake(client: SuiGrpcClient, keypair: Keypair, e
   });
   return {
     stake: commandU64(result, 0).toString(),
-    reserved: commandU64(result, 1).toString(),
-    available: commandU64(result, 2).toString(),
-  };
-}
-
-export function makeBidPlans(intentRecords: IntentRecord[], chunkSize: number, payoutMultiplier: bigint): BidPlan[] {
-  const usable = intentRecords.filter((record) => record.status === 'success' && record.intentId && record.minAmountOut);
-  const plans: BidPlan[] = [];
-  const size = Math.max(1, Math.floor(chunkSize));
-  for (let i = 0; i < usable.length; i += size) {
-    const chunk = usable.slice(i, i + size);
-    const fills = chunk.map((record) => record.sellAmount);
-    const minAmounts = chunk.map((record) => BigInt(record.minAmountOut!));
-    const payouts = minAmounts.map((amount) => amount * payoutMultiplier);
-    const score = payouts.reduce((sum, payout, idx) => sum + (payout - minAmounts[idx]!), 0n);
-    plans.push({
-      index: plans.length + 1,
-      intentIds: chunk.map((record) => record.intentId!),
-      fills,
-      payouts: payouts.map((value) => value.toString()),
-      declaredMulti: distinctPairs(chunk) > 1,
-      score: score.toString(),
-    });
-  }
-  return plans;
-}
-
-export async function submitBid(
-  client: SuiGrpcClient,
-  keypair: Keypair,
-  env: BenchEnv,
-  plan: BidPlan,
-): Promise<BidRecord> {
-  const tx = new Transaction();
-  tx.moveCall({
-    target: `${env.packageId}::auction::submit_bid`,
-    typeArguments: [env.stakeType],
-    arguments: [
-      tx.object(env.auctionStateId),
-      tx.object(env.solverRegistryId),
-      tx.object(env.globalConfigId),
-      tx.pure.vector('address', plan.intentIds),
-      tx.pure.vector('u64', plan.fills),
-      tx.pure.vector('u64', plan.payouts),
-      tx.pure.bool(plan.declaredMulti),
-      tx.pure.u64(plan.score),
-    ],
-  });
-
-  const { record, result } = await executeTx(client, keypair, env, tx, 'submit_bid', plan.index);
-  const event = findEvent(result, '::events::BidSubmittedEvent');
-  const data = event ? eventData(event) : {};
-
-  return {
-    ...record,
-    bidSeq: valueOf(data.bid_seq ?? data.bidSeq),
-    intentCount: Number(valueOf(data.intent_count ?? data.intentCount) ?? plan.intentIds.length),
-    score: valueOf(data.score) ?? plan.score,
-    stakeReserved: valueOf(data.stake_reserved ?? data.stakeReserved),
-  };
-}
-
-export async function submitPairBenchmark(
-  client: SuiGrpcClient,
-  keypair: Keypair,
-  env: BenchEnv,
-  bidSeqs: string[],
-  index = 1,
-): Promise<SelectionRecord> {
-  const tx = new Transaction();
-  tx.moveCall({
-    target: `${env.packageId}::auction::submit_pair_benchmark`,
-    typeArguments: [env.stakeType],
-    arguments: [
-      tx.object(env.auctionStateId),
-      tx.object(env.solverRegistryId),
-      tx.object(env.globalConfigId),
-      tx.pure.vector('u64', bidSeqs),
-    ],
-  });
-  const { record, result } = await executeTx(client, keypair, env, tx, 'submit_pair_benchmark', index);
-  const event = findEvent(result, '::events::PairBenchmarkSubmittedEvent');
-  const data = event ? eventData(event) : {};
-  return {
-    ...record,
-    bidSeqs,
-    totalScore: valueOf(data.total_score ?? data.totalScore),
-    bidCount: Number(valueOf(data.bid_count ?? data.bidCount) ?? bidSeqs.length),
-  };
-}
-
-export async function submitAllocation(
-  client: SuiGrpcClient,
-  keypair: Keypair,
-  env: BenchEnv,
-  bidSeqs: string[],
-  totalScore: string,
-  index = 1,
-): Promise<SelectionRecord> {
-  const tx = new Transaction();
-  tx.moveCall({
-    target: `${env.packageId}::auction::submit_allocation`,
-    typeArguments: [env.stakeType],
-    arguments: [
-      tx.object(env.auctionStateId),
-      tx.object(env.solverRegistryId),
-      tx.object(env.globalConfigId),
-      tx.pure.vector('u64', bidSeqs),
-      tx.pure.u64(totalScore),
-    ],
-  });
-  const { record, result } = await executeTx(client, keypair, env, tx, 'submit_allocation', index);
-  const event = findEvent(result, '::events::AllocationSubmittedEvent');
-  const data = event ? eventData(event) : {};
-  return {
-    ...record,
-    bidSeqs,
-    totalScore: valueOf(data.total_score ?? data.totalScore) ?? totalScore,
-    bidCount: Number(valueOf(data.bid_count ?? data.bidCount) ?? bidSeqs.length),
+    available: commandU64(result, 1).toString(),
   };
 }
 
@@ -326,8 +332,24 @@ function maybeRefreshDeepBook(tx: Transaction, env: BenchEnv) {
 
 function valueOf(value: unknown): string | undefined {
   if (value == null) return undefined;
-  if (typeof value === 'object' && 'id' in value) return String((value as { id: unknown }).id);
+  if (typeof value === 'object') {
+    if ('id' in value) return String((value as { id: unknown }).id);
+    if ('name' in value) return valueOf((value as { name: unknown }).name);
+    if ('bytes' in value) {
+      const bytes = (value as { bytes: unknown }).bytes;
+      if (Array.isArray(bytes)) return decoder.decode(Uint8Array.from(bytes));
+      return valueOf(bytes);
+    }
+  }
   return String(value);
+}
+
+function typeTag(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const parts = value.split('::');
+  if (parts.length < 3) return value;
+  const address = parts[0]!.startsWith('0x') ? parts[0]! : `0x${parts[0]}`;
+  return [address, ...parts.slice(1)].join('::');
 }
 
 function commandU64(result: any, commandIndex: number) {
@@ -340,14 +362,14 @@ function commandU64(result: any, commandIndex: number) {
   return value;
 }
 
+function sum(values: string[]) {
+  return values.reduce((acc, value) => acc + BigInt(value), 0n);
+}
+
 function lcg(seed: number) {
   let state = seed >>> 0;
   return () => {
     state = (1664525 * state + 1013904223) >>> 0;
     return state / 0xffffffff;
   };
-}
-
-function distinctPairs(records: IntentRecord[]) {
-  return new Set(records.map((record) => `${record.sellType ?? ''}->${record.buyType ?? ''}`)).size;
 }
