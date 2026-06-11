@@ -243,7 +243,7 @@ export function buildSettleSolutionTx(env: BenchEnv, certificate: SolutionCertif
     tx.transferObjects([sellCoin], tx.pure.address(certificate.solver));
     const payout = tx.coin({ type: certificate.buyType, balance: BigInt(certificate.grossPayouts[i]!) });
     tx.moveCall({
-      target: `${env.packageId}::settlement::settle_intent_numeraire`,
+      target: `${env.packageId}::settlement::settle_intent`,
       typeArguments: [certificate.sellType, certificate.buyType, env.stakeType],
       arguments: [
         tx.object(env.auctionStateId),

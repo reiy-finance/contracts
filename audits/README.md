@@ -30,12 +30,13 @@ Security reviews of the REIY Move package.
 | 008 | 2026-06-07 | Internal (optimization) | drop dead Bid/Selection collections after winner selection to shrink settlement-phase `AuctionState`; correctness preserved | [008-2026-06-07-settlement-object-size.md](008-2026-06-07-settlement-object-size.md) |
 | 009 | 2026-06-07 | Internal (STRIDE) | full-package mainnet-readiness re-audit; cross-token reward hole (F-009-1) + dead-code hygiene; re-confirmed 004 fixes | [009-2026-06-07-mainnet-readiness.md](009-2026-06-07-mainnet-readiness.md) |
 | 010 | 2026-06-07 | Internal (remediation) | F-009-1 closed for v1 via numeraire-only allowlist gate (+ numeraire lock); regression test | [010-2026-06-07-numeraire-only-v1.md](010-2026-06-07-numeraire-only-v1.md) |
+| 011 | 2026-06-11 | Internal (remediation) | 010 superseded by direct Buy-token fee vaults; arbitrary directed pairs supported | [011-2026-06-11-remediation-direct-buy-fees.md](011-2026-06-11-remediation-direct-buy-fees.md) |
 
 ## Findings register (current status)
 
 | Severity | Title | Found in | Status |
 | --- | --- | --- | --- |
-| High | Cross-token VCG reward: per-solver fee cap mixes Buy-token units / drawn from numeraire vault | 009 | Fixed (010) — v1 numeraire-only allowlist gate; multi-token Buy deferred to v2 |
+| High | Cross-token VCG reward: per-solver fee cap mixes Buy-token units / drawn from numeraire vault | 009 | Fixed (011) — direct `FeeVault<Buy>` fees; 010 superseded |
 | Medium | Expired winning intent re-queued / unfair slash | 001 | Fixed (003) |
 | Medium | Fully-drained partial-fill intent leaves a zombie shared object | 001 | Fixed (003) |
 | Medium | Unbounded loops in `close_batch` / `distribute_rewards` / `trigger_fallback` enable gas DoS | 001 | Mitigated (005 `max_allocations` cap; 007 removed allocation scan from reward path) |
@@ -49,7 +50,7 @@ Security reviews of the REIY Move package.
 | Low | Overpaid protocol fee in `close_batch` not refunded | 001 | Fixed (003); moot since 005 (no close fee coin) |
 | Low | `update_intent_params` gating | 001 | Reclassified (002): dead code, latent |
 | Informational | Fallback bounty payable to the at-fault solver | 004 | Fixed (009 — confirmed) — `trigger_fallback` zeroes bounty when caller ∈ slashed owners |
-| Informational | Dead treasury numeraire-revenue path (`deposit_fee`/`withdraw_protocol_fees`/`withdraw_reward` uncalled) | 009 | Open (hygiene) |
+| Informational | Dead treasury numeraire-revenue path (`deposit_fee`/`withdraw_protocol_fees`/`withdraw_reward` uncalled) | 009 | Fixed/moot (011) — no numeraire settlement path |
 | Informational | `price_oracle_max_age_ms` is dead config (never read by `read_mid_price`) | 009 | Open (hygiene) |
 | Informational | VCG reward now depends on live DeepBook mid (manipulation surface); bounded by `β × fee` cap once F-009-1 fixed | 009 | Open — TWAP recommended for multi-token Buy |
 | Informational | `auctioneer_share_bps` / `auctioneer_reward_cap` are dead config | 004 | Resolved (005) — removed in config rewrite |

@@ -42,8 +42,6 @@ const ENotAdmin: vector<u8> = b"caller lacks ROLE_CONFIG_ADMIN";
 #[error]
 const EInvalidParam: vector<u8> = b"parameter out of allowed bounds";
 #[error]
-const ENumeraireNotSet: vector<u8> = b"numeraire type not configured";
-#[error]
 const EPairNotSupported: vector<u8> = b"directed pair not on allowlist";
 #[error]
 const ECanonicalObjectNotSet: vector<u8> = b"canonical object not configured";
@@ -53,10 +51,6 @@ const ECanonicalObjectAlreadySet: vector<u8> = b"canonical object already config
 const EWrongCanonicalObject: vector<u8> = b"wrong canonical object";
 #[error]
 const EFeeVaultNotRegistered: vector<u8> = b"fee vault not registered for this token";
-#[error]
-const ENonNumeraireBuy: vector<u8> = b"numeraire-only launch: a supported pair's Buy token must be the numeraire";
-#[error]
-const ENumeraireLocked: vector<u8> = b"numeraire cannot be changed once pairs are allowlisted";
 #[error]
 const EBadCoordinatorKey: vector<u8> = b"execution coordinator pubkey must be 32 bytes";
 
@@ -109,8 +103,6 @@ public struct CoordinatorConfig has store {
 
 public struct MarketConfig has store {
     supported_pairs: VecSet<PairKey>,
-    numeraire_pools: VecMap<TypeName, ID>,
-    numeraire_type: Option<TypeName>,
     pair_fee_tiers: VecMap<PairKey, FeeTier>,
     fee_vaults: VecMap<TypeName, ID>,
 }
@@ -135,7 +127,7 @@ fun init(ctx: &mut TxContext) {
     acl.members.add(ctx.sender(), vector[ROLE_CONFIG_ADMIN]);
     transfer::share_object(GlobalConfig {
         id: object::new(ctx),
-        version: 7,
+        version: 8,
         auction: AuctionConfig {
             min_batch_collect_ms: DEFAULT_MIN_BATCH_COLLECT_MS,
         },
@@ -164,8 +156,6 @@ fun init(ctx: &mut TxContext) {
         },
         market: MarketConfig {
             supported_pairs: vec_set::empty(),
-            numeraire_pools: vec_map::empty(),
-            numeraire_type: option::none(),
             pair_fee_tiers: vec_map::empty(),
             fee_vaults: vec_map::empty(),
         },
@@ -338,6 +328,11 @@ public fun fee_vault_id<T>(c: &GlobalConfig): ID {
     *c.market.fee_vaults.get(&key)
 }
 
+public fun has_fee_vault<T>(c: &GlobalConfig): bool {
+    let key = type_name::with_defining_ids<T>();
+    c.market.fee_vaults.contains(&key)
+}
+
 public fun assert_fee_vault_id<T>(c: &GlobalConfig, id: ID) {
     assert!(fee_vault_id<T>(c) == id, EWrongCanonicalObject);
 }
@@ -345,11 +340,7 @@ public fun assert_fee_vault_id<T>(c: &GlobalConfig, id: ID) {
 // === Allowlists ===
 
 public fun add_supported_pair<Sell, Buy>(c: &mut GlobalConfig, _: &AdminCap) {
-    // Launch is numeraire-only: every supported pair must BUY the numeraire. This keeps user payouts,
-    // protocol fees, and immediate solver fee shares in the same unit. Multi-token Buy support
-    // needs explicit fee conversion and is deferred to a later package.
-    // `numeraire_type` aborts if the numeraire is unset, so the numeraire must be configured first.
-    assert!(type_name::with_defining_ids<Buy>() == numeraire_type(c), ENonNumeraireBuy);
+    assert!(has_fee_vault<Buy>(c), EFeeVaultNotRegistered);
     let key = types::pair_key<Sell, Buy>();
     if (!c.market.supported_pairs.contains(&key)) c.market.supported_pairs.insert(key);
 }
@@ -365,37 +356,6 @@ public fun is_pair_supported(c: &GlobalConfig, key: &PairKey): bool {
 
 public fun assert_pair_supported(c: &GlobalConfig, key: &PairKey) {
     assert!(c.market.supported_pairs.contains(key), EPairNotSupported);
-}
-
-public fun set_numeraire<N>(c: &mut GlobalConfig, _: &AdminCap) {
-    // The numeraire underpins fee denomination and the v1 numeraire-only pair invariant. Forbid
-    // changing it once any pair is allowlisted; set the numeraire first, then allowlist pairs.
-    assert!(c.market.supported_pairs.length() == 0, ENumeraireLocked);
-    c.market.numeraire_type = option::some(type_name::with_defining_ids<N>());
-}
-
-public fun add_numeraire_pool<Token>(c: &mut GlobalConfig, pool_id: ID, _: &AdminCap) {
-    let key = type_name::with_defining_ids<Token>();
-    if (c.market.numeraire_pools.contains(&key)) {
-        *c.market.numeraire_pools.get_mut(&key) = pool_id;
-    } else {
-        c.market.numeraire_pools.insert(key, pool_id);
-    };
-}
-
-public fun remove_numeraire_pool<Token>(c: &mut GlobalConfig, _: &AdminCap) {
-    let key = type_name::with_defining_ids<Token>();
-    if (c.market.numeraire_pools.contains(&key)) { c.market.numeraire_pools.remove(&key); };
-}
-
-public fun numeraire_pool_id(c: &GlobalConfig, token: TypeName): Option<ID> {
-    if (c.market.numeraire_pools.contains(&token)) option::some(*c.market.numeraire_pools.get(&token))
-    else option::none()
-}
-
-public fun numeraire_type(c: &GlobalConfig): TypeName {
-    assert!(c.market.numeraire_type.is_some(), ENumeraireNotSet);
-    *c.market.numeraire_type.borrow()
 }
 
 public fun set_solver_registry_id(c: &mut GlobalConfig, id: ID, _: &AdminCap) {

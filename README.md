@@ -25,7 +25,7 @@ sequenceDiagram
     note over Solver,Chain: one PTB
     Solver->>Chain: verify_solution → SolutionAuth
     Solver->>Chain: take_authorized_intent (receive Sell coin)
-    Solver->>Chain: settle_intent_numeraire (deliver payout)
+    Solver->>Chain: settle_intent (deliver payout)
     end
     Chain-->>User: net payout
     Chain-->>Solver: fee share
@@ -41,13 +41,13 @@ sequenceDiagram
 
 | Module | Role |
 | --- | --- |
-| `config` | `GlobalConfig` (shared) + `AdminCap` (owned): parameters, ACL, allowlists, numeraire, Coordinator key. |
+| `config` | `GlobalConfig` (shared) + `AdminCap` (owned): parameters, ACL, allowlists, Coordinator key. |
 | `intent_book` | `Intent<Sell, Buy>` shared object: SBBO-gated creation, escrow, partial-fill, cancel. |
 | `auction` | Slim `AuctionState` (shared): epoch counter, per-epoch partial-fill set, fee totals. |
 | `settlement` | Certificate verification + per-intent settlement, fee split, user protection. |
 | `solver_registry` | `SolverRegistry<Stake>` (shared): solver bond + active status. |
 | `fee_vault` | `FeeVault<T>` (shared): per-token protocol fee balance. |
-| `price_adapter` | DeepBook mid-price reader + SBBO / numeraire normalization math. |
+| `price_adapter` | DeepBook mid-price reader + SBBO helper math. |
 | `events`, `math`, `types` | Event structs, fixed-point helpers, `PairKey`. |
 
 ## On-chain objects
@@ -58,7 +58,7 @@ sequenceDiagram
 | `AdminCap` | owned | Held by deployer; transfer to multisig for mainnet. |
 | `AuctionState` | shared | Protocol state; pinned by `SolutionMessage.protocol_state_id`. |
 | `SolverRegistry<Stake>` | shared | Solver bonds; `Stake` is the bond coin type. |
-| `FeeVault<numeraire>` | shared | Canonical fee sink, registered in config. |
+| `FeeVault<T>` | shared | Canonical fee sink for token `T`, registered in config. |
 | `Intent<Sell, Buy>` | shared | Holds escrowed `Sell`; source of truth for one user order. |
 
 ## Lifecycle
@@ -87,7 +87,7 @@ parallel `intent_ids` / `fills` / `gross_payouts` / `protected_mins`, plus `expi
 
 `verify_solution` (checks signature, sender, epoch, token types, expiry) → `SolutionAuth` hot-potato →
 `take_authorized_intent_full|partial` per intent in order → deliver `payout: Coin<Buy>` via
-`settle_intent_numeraire`. Full sequence in [SOLVERS.md](SOLVERS.md).
+`settle_intent`. Full sequence in [SOLVERS.md](SOLVERS.md).
 
 ## User protections (enforced on-chain)
 
@@ -104,7 +104,7 @@ A bad settlement aborts the PTB — escrow never moves.
 
 ## Fees
 
-On each settled intent, over `gross` payout (numeraire units):
+On each settled intent, over `gross` payout in the `Buy` token:
 
 ```text
 volume_fee  = gross × volume_fee_ppm(pair) / 1e6        # require gross − volume_fee ≥ protected_min
@@ -112,7 +112,7 @@ surplus     = gross − volume_fee − protected_min
 surplus_fee = min(surplus × surplus_fee_ppm,  gross × surplus_fee_cap_ppm) / 1e6
 total_fee   = min(volume_fee + surplus_fee,   gross × max_total_fee_ppm)   / 1e6
 solver_fee  = total_fee × solver_fee_share_ppm / 1e6     # paid to the solver immediately
-protocol_fee= total_fee − solver_fee                     # → FeeVault<numeraire>
+protocol_fee= total_fee − solver_fee                     # → FeeVault<Buy>
 net         = gross − total_fee                           # → user
 ```
 
@@ -144,9 +144,7 @@ passive eligibility deposit; orchestration and any penalties are handled by the 
 All setters require `AdminCap`; reads are public. Roles are managed by an ACL
 (`grant_role` / `revoke_role`, `ROLE_CONFIG_ADMIN`).
 
-- **Numeraire (launch invariant):** `set_numeraire<N>` (locked once any pair is allowlisted);
-  `add_supported_pair<Sell, Buy>` requires `Buy == numeraire`. Optional `add_numeraire_pool<Token>`
-  for normalization of non-numeraire surplus (future).
+- **Pairs:** `register_fee_vault<Buy>` before `add_supported_pair<Sell, Buy>`.
 - **Fees:** `set_standard_volume_fee_ppm`, `set_correlated_volume_fee_ppm`, `set_surplus_fee_ppm`,
   `set_surplus_fee_cap_ppm`, `set_max_total_fee_ppm`, `set_solver_fee_share_ppm`,
   `set_pair_fee_tier<Sell, Buy>`.
@@ -167,12 +165,11 @@ All setters require `AdminCap`; reads are public. Roles are managed by an ACL
 Breaking architecture change from the on-chain-auction version: deploy a fresh package and fresh
 objects (no in-place upgrade). After publish, initialize in order:
 
-1. `set_numeraire<N>` — **before** any pair.
-2. `init_registry<Stake>` → `set_solver_registry_id`.
-3. `init_fee_vault<numeraire>` → `register_fee_vault<numeraire>`.
-4. `set_execution_coordinator(pubkey, key_version)`.
-5. `add_supported_pair<Sell, numeraire>` for each launch pair.
-6. Transfer `AdminCap` to the governance multisig.
+1. `init_registry<Stake>` → `set_solver_registry_id`.
+2. `init_fee_vault<Buy>` → `register_fee_vault<Buy>` for every supported Buy token.
+3. `set_execution_coordinator(pubkey, key_version)`.
+4. `add_supported_pair<Sell, Buy>` for each launch pair.
+5. Transfer `AdminCap` to the governance multisig.
 
 See `scripts/setup.sh` and `.env.{testnet,mainnet}.example`.
 
@@ -184,8 +181,7 @@ market in v1; future work may add optimistic challenges or multi-coordinator sig
 
 ## Launch constraints
 
-- **Numeraire-only:** every supported pair Buys the numeraire, so payouts, fees, and solver shares
-  share one unit; non-numeraire Buy (with fee conversion) is deferred.
+- **Direct fees:** protocol and solver fees are paid in the settled `Buy` token.
 - **Single Coordinator key** (rotatable via `key_version`).
 
 ## Build & test

@@ -18,9 +18,8 @@ on-chain, the off-chain **Execution Coordinator** scores bids and signs the winn
   ```move
   solver_registry::register_solver<Stake>(registry, config, stake: Coin<Stake>, url, ctx)
   ```
-- **Numeraire-only launch.** Every supported pair Buys the protocol numeraire, so `Buy == numeraire`
-  for all intents and you settle via `settle_intent_numeraire`. (`settle_intent` with a numeraire
-  pool exists for future non-numeraire Buy and is not used at launch.)
+- **Supported pairs.** A pair is settleable when `add_supported_pair<Sell, Buy>` is enabled and
+  `FeeVault<Buy>` is registered in config.
 
 ## 3. Solution certificate
 
@@ -58,7 +57,7 @@ let (sell_coin, receipt) = settlement::take_authorized_intent_full<Sell, Buy>(
 // 3. Source liquidity with `sell_coin` (e.g. DeepBook), produce `payout: Coin<Buy>`.
 
 // 4. Deliver payout; contract splits fees, pays user net, pays your fee share.
-settlement::settle_intent_numeraire<Sell, Buy, Stake>(
+settlement::settle_intent<Sell, Buy, Stake>(
     state, registry, config, fee_vault, receipt, payout, ctx,
 );
 ```
@@ -78,7 +77,7 @@ Violations abort the whole PTB — escrow never moves on a bad settlement.
 
 ## 6. Fees & your reward
 
-Per settled intent, on `gross` payout (in numeraire):
+Per settled intent, on `gross` payout in the `Buy` token:
 
 | Component | Rule | Default |
 | --- | --- | --- |
@@ -86,7 +85,7 @@ Per settled intent, on `gross` payout (in numeraire):
 | Surplus fee | `min(surplus_share × (gross−protected_min), cap × gross)` | 10% share, 0.10% cap |
 | Total fee | `min(volume+surplus, max_total_fee_ppm × gross)` | ≤ 0.15% |
 | **Your share** | `total_fee × solver_fee_share_ppm`, paid to you immediately | **35%** |
-| Protocol | remainder → `FeeVault<numeraire>` | 65% |
+| Protocol | remainder → `FeeVault<Buy>` | 65% |
 
 User receives `net = gross − total_fee`.
 
@@ -105,4 +104,4 @@ User receives `net = gross − total_fee`.
 `ENotAuthorizedSolver` (sender ≠ cert solver) · `EBadSolutionSignature` · `EExpiredSolution` ·
 `EWrongEpoch` · `EIntentMismatch` (out-of-order take) · `EBadGrossPayout` (payout ≠ cert) ·
 `EBelowProtectedMinimum` / `EBelowFloor` (user protection) · `ESolverNotActive` (stake too low) ·
-`ENotNumeraire` (Buy ≠ numeraire at launch).
+`EWrongCanonicalObject` (wrong fee vault).

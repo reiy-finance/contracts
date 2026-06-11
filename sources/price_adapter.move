@@ -40,12 +40,12 @@ public fun sbbo_floor_quote_to_base(sell_amount: u64, mid_price: u64, sigma_bps:
     apply_slippage_floor(expected_out_quote_to_base(sell_amount, mid_price), sigma_bps)
 }
 
-/// Convert an amount of the numeraire-pool's BASE token into quote (numeraire) units.
+/// Convert a BASE amount into QUOTE units at the supplied mid price.
 public fun normalize_base_to_quote(amount: u64, price: u64): u64 {
     math::mul_div_floor(amount, price, FLOAT_SCALING)
 }
 
-/// Convert an amount of the numeraire-pool's QUOTE token into base (numeraire) units.
+/// Convert a QUOTE amount into BASE units at the supplied mid price.
 public fun normalize_quote_to_base(amount: u64, price: u64): u64 {
     math::mul_div_floor(amount, FLOAT_SCALING, price)
 }

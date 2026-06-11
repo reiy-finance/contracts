@@ -73,7 +73,7 @@ fun settle_one(
     let (sell_coin, receipt) =
         settlement::take_authorized_intent_full(state, &mut auth, intent, clock, ts::ctx(sc));
     h::burn(sell_coin);
-    settlement::settle_intent_numeraire(
+    settlement::settle_intent(
         state,
         registry,
         cfg,

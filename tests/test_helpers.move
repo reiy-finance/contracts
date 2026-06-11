@@ -12,7 +12,7 @@ use reiy::fee_vault;
 use reiy::solver_registry;
 
 // === Marker coin types ===
-public struct USDC has drop {} // protocol numeraire
+public struct USDC has drop {}
 public struct TOKA has drop {}
 public struct TOKB has drop {}
 
@@ -31,7 +31,7 @@ public fun new_clock(ctx: &mut TxContext): Clock {
     clock::create_for_testing(ctx)
 }
 
-/// Initialize canonical test protocol objects including FeeVault<USDC>.
+/// Initialize canonical test protocol objects and fee vaults used by tests.
 public fun setup_all(scenario: &mut Scenario, admin: address) {
     ts::next_tx(scenario, admin);
     {
@@ -43,17 +43,15 @@ public fun setup_all(scenario: &mut Scenario, admin: address) {
     {
         let mut cfg = ts::take_shared<GlobalConfig>(scenario);
         let cap = ts::take_from_sender<AdminCap>(scenario);
-        config::set_numeraire<USDC>(&mut cfg, &cap);
-        // v1 numeraire-only: every supported pair must buy the numeraire (USDC). A non-numeraire
-        // Buy pair such as TOKA/TOKB is now rejected by add_supported_pair (audit F-009-1 gate).
+        let usdc_vault_id = fee_vault::init_fee_vault<USDC>(&cap, ts::ctx(scenario));
+        config::register_fee_vault<USDC>(&mut cfg, usdc_vault_id, &cap);
+        let tokb_vault_id = fee_vault::init_fee_vault<TOKB>(&cap, ts::ctx(scenario));
+        config::register_fee_vault<TOKB>(&mut cfg, tokb_vault_id, &cap);
         config::add_supported_pair<TOKA, USDC>(&mut cfg, &cap);
         config::add_supported_pair<TOKB, USDC>(&mut cfg, &cap);
         let registry_id = solver_registry::init_for_testing<SUI>(&cap, ts::ctx(scenario));
         config::set_solver_registry_id(&mut cfg, registry_id, &cap);
         config::set_execution_coordinator(&mut cfg, COORDINATOR_PUBKEY, 1, &cap);
-        // Create and register the canonical FeeVault<USDC>
-        let vault_id = fee_vault::init_fee_vault<USDC>(&cap, ts::ctx(scenario));
-        config::register_fee_vault<USDC>(&mut cfg, vault_id, &cap);
         ts::return_to_sender(scenario, cap);
         ts::return_shared(cfg);
     };

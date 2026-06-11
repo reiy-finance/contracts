@@ -53,9 +53,9 @@ fun test_sbbo_directions_differ() {
 
 #[test]
 fun test_normalize_roundtrip_scales() {
-    // normalize base->quote at price 2x: 100 base -> 200 numeraire
+    // normalize base->quote at price 2x: 100 base -> 200 quote
     assert!(pa::normalize_base_to_quote(100, 2 * K) == 200, 0);
-    // normalize quote->base at price 2x: 200 quote -> 100 numeraire
+    // normalize quote->base at price 2x: 200 quote -> 100 base
     assert!(pa::normalize_quote_to_base(200, 2 * K) == 100, 1);
 }
 

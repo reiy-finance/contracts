@@ -5,14 +5,12 @@
 /// protection before any escrowed sell asset can leave an Intent.
 module reiy::settlement;
 
-use deepbook::pool::Pool;
 use reiy::auction::{Self, AuctionState};
 use reiy::config::GlobalConfig;
 use reiy::events;
 use reiy::fee_vault::{Self, FeeVault};
 use reiy::intent_book::{Self, Intent};
 use reiy::math;
-use reiy::price_adapter;
 use reiy::solver_registry::{Self, SolverRegistry};
 use reiy::types::{Self, PairKey};
 use std::bcs;
@@ -53,10 +51,6 @@ const EBelowProtectedMinimum: vector<u8> = b"certificate protected minimum below
 const EBadGrossPayout: vector<u8> = b"payout does not match certificate gross payout";
 #[error]
 const EBelowFloor: vector<u8> = b"payout below protected minimum after volume fee";
-#[error]
-const EBadNumerairePool: vector<u8> = b"numeraire pool does not match buy token / allowlist";
-#[error]
-const ENotNumeraire: vector<u8> = b"buy token is not the configured numeraire";
 #[error]
 const ETokenMismatch: vector<u8> = b"solution token types do not match settlement call";
 
@@ -234,7 +228,7 @@ public fun take_authorized_intent_partial<Sell, Buy>(
     (coin::from_balance(balance, ctx), receipt)
 }
 
-public fun settle_intent_numeraire<Sell, Buy, Stake>(
+public fun settle_intent<Sell, Buy, Stake>(
     state: &mut AuctionState,
     registry: &mut SolverRegistry<Stake>,
     config: &GlobalConfig,
@@ -244,7 +238,6 @@ public fun settle_intent_numeraire<Sell, Buy, Stake>(
     ctx: &mut TxContext,
 ) {
     assert_solver_registry(config, registry);
-    assert!(type_name::with_defining_ids<Buy>() == config.numeraire_type(), ENotNumeraire);
     fee_vault::assert_canonical<Buy>(config, fee_vault);
 
     let gross = payout.value();
@@ -257,48 +250,6 @@ public fun settle_intent_numeraire<Sell, Buy, Stake>(
         receipt,
         payout,
         gross - protected_min,
-        protected_min,
-        ctx,
-    );
-}
-
-public fun settle_intent<Sell, Buy, NumBase, NumQuote, Stake>(
-    state: &mut AuctionState,
-    registry: &mut SolverRegistry<Stake>,
-    config: &GlobalConfig,
-    fee_vault: &mut FeeVault<Buy>,
-    receipt: SettlementReceipt<Sell, Buy>,
-    payout: Coin<Buy>,
-    num_pool: &Pool<NumBase, NumQuote>,
-    clock: &Clock,
-    ctx: &mut TxContext,
-) {
-    assert_solver_registry(config, registry);
-    fee_vault::assert_canonical<Buy>(config, fee_vault);
-
-    let buy_t = type_name::with_defining_ids<Buy>();
-    let expected = config.numeraire_pool_id(buy_t);
-    assert!(expected.is_some() && *expected.borrow() == object::id(num_pool), EBadNumerairePool);
-
-    let gross = payout.value();
-    let protected_min = receipt.protected_min;
-    let mid = price_adapter::read_mid_price(num_pool, config, clock);
-    let (score_value, _) = normalize_surplus<Buy, NumBase, NumQuote>(
-        config,
-        gross - protected_min,
-        protected_min,
-        mid,
-    );
-
-    finalize_settlement(
-        state,
-        registry,
-        config,
-        fee_vault,
-        receipt,
-        payout,
-        score_value,
-        protected_min,
         ctx,
     );
 }
@@ -311,7 +262,6 @@ fun finalize_settlement<Sell, Buy, Stake>(
     receipt: SettlementReceipt<Sell, Buy>,
     mut payout: Coin<Buy>,
     score_value: u64,
-    _floor_value: u64,
     ctx: &mut TxContext,
 ) {
     let SettlementReceipt {
@@ -428,35 +378,6 @@ fun compute_fees(config: &GlobalConfig, pair: &PairKey, gross: u64, protected_mi
     let total_fee = if (total_uncapped < total_cap) total_uncapped else total_cap;
 
     (volume_fee, surplus_fee, total_fee)
-}
-
-fun normalize_surplus<Buy, NumBase, NumQuote>(
-    config: &GlobalConfig,
-    surplus: u64,
-    floor: u64,
-    mid: u64,
-): (u64, u64) {
-    let buy_t = type_name::with_defining_ids<Buy>();
-    let base_t = type_name::with_defining_ids<NumBase>();
-    let quote_t = type_name::with_defining_ids<NumQuote>();
-    let num_t = config.numeraire_type();
-
-    if (buy_t == num_t) {
-        (surplus, floor)
-    } else if (buy_t == base_t && quote_t == num_t) {
-        (
-            price_adapter::normalize_base_to_quote(surplus, mid),
-            price_adapter::normalize_base_to_quote(floor, mid),
-        )
-    } else if (buy_t == quote_t && base_t == num_t) {
-        (
-            price_adapter::normalize_quote_to_base(surplus, mid),
-            price_adapter::normalize_quote_to_base(floor, mid),
-        )
-    } else {
-        assert!(false, EBadNumerairePool);
-        (0, 0)
-    }
 }
 
 fun assert_solver_registry<Stake>(config: &GlobalConfig, registry: &SolverRegistry<Stake>) {

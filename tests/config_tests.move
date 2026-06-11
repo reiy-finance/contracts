@@ -10,6 +10,8 @@ const BOB: address = @0xB0B;
 const COORDINATOR_PUBKEY_2: vector<u8> =
     x"0101010101010101010101010101010101010101010101010101010101010101";
 
+public struct TOKC has drop {}
+
 #[test]
 fun test_defaults() {
     let mut sc = ts::begin(ADMIN);
@@ -18,7 +20,7 @@ fun test_defaults() {
     ts::next_tx(&mut sc, ADMIN);
     {
         let cfg = ts::take_shared<GlobalConfig>(&mut sc);
-        assert!(config::version(&cfg) == 7, 0);
+        assert!(config::version(&cfg) == 8, 0);
         // PPM fee defaults
         assert!(config::standard_volume_fee_ppm(&cfg) == 75, 1);
         assert!(config::correlated_volume_fee_ppm(&cfg) == 10, 2);
@@ -123,18 +125,32 @@ fun test_bad_coordinator_key_aborts() {
     ts::end(sc);
 }
 
-/// V1 numeraire-only gate: a supported pair whose Buy token is not the numeraire must be rejected
-/// so fees and immediate solver shares stay denominated in the payout token.
 #[test]
-#[expected_failure(abort_code = reiy::config::ENonNumeraireBuy)]
-fun test_non_numeraire_buy_pair_rejected() {
+fun test_non_usdc_buy_pair_supported_with_fee_vault() {
     let mut sc = ts::begin(ADMIN);
     h::setup_all(&mut sc, ADMIN);
     ts::next_tx(&mut sc, ADMIN);
     {
         let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
         let cap = ts::take_from_sender<AdminCap>(&mut sc);
-        config::add_supported_pair<TOKA, TOKB>(&mut cfg, &cap); // Buy = TOKB != USDC
+        config::add_supported_pair<TOKA, TOKB>(&mut cfg, &cap);
+        assert!(config::is_pair_supported(&cfg, &reiy::types::pair_key<TOKA, TOKB>()), 0);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
+    ts::end(sc);
+}
+
+#[test]
+#[expected_failure(abort_code = reiy::config::EFeeVaultNotRegistered)]
+fun test_supported_pair_requires_buy_fee_vault() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<AdminCap>(&mut sc);
+        config::add_supported_pair<TOKA, TOKC>(&mut cfg, &cap);
         ts::return_to_sender(&mut sc, cap);
         ts::return_shared(cfg);
     };

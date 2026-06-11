@@ -2,12 +2,12 @@
 module reiy::flow_tests;
 
 use reiy::auction::{Self, AuctionState};
-use reiy::config::GlobalConfig;
+use reiy::config::{Self as config, GlobalConfig};
 use reiy::fee_vault::{Self, FeeVault};
 use reiy::intent_book::{Self, Intent};
 use reiy::settlement;
 use reiy::solver_registry::{Self as reg, SolverRegistry};
-use reiy::test_helpers::{Self as h, TOKA, USDC};
+use reiy::test_helpers::{Self as h, TOKA, TOKB, USDC};
 use sui::clock::Clock;
 use sui::coin::Coin;
 use sui::sui::SUI;
@@ -74,7 +74,7 @@ fun settle_full(sc: &mut Scenario, clock: &Clock, solver: address, id: ID, sell:
     let (sell_coin, receipt) =
         settlement::take_authorized_intent_full(&mut state, &mut auth, intent, clock, ts::ctx(sc));
     h::burn(sell_coin);
-    settlement::settle_intent_numeraire(
+    settlement::settle_intent(
         &mut state,
         &mut registry,
         &cfg,
@@ -126,6 +126,92 @@ fun test_valid_certificate_settles_full_intent_and_splits_fee() {
 }
 
 #[test]
+fun test_non_usdc_buy_settles_and_collects_fee_in_buy_token() {
+    let mut sc = ts::begin(ADMIN);
+    h::setup_all(&mut sc, ADMIN);
+    ts::next_tx(&mut sc, ADMIN);
+    let mut clock = h::new_clock(ts::ctx(&mut sc));
+    clock.set_for_testing(1_000);
+    {
+        let mut cfg = ts::take_shared<GlobalConfig>(&mut sc);
+        let cap = ts::take_from_sender<reiy::config::AdminCap>(&mut sc);
+        config::add_supported_pair<TOKA, TOKB>(&mut cfg, &cap);
+        ts::return_to_sender(&mut sc, cap);
+        ts::return_shared(cfg);
+    };
+    register_solver(&mut sc, SOLVER);
+
+    ts::next_tx(&mut sc, USER);
+    let mut state = ts::take_shared<AuctionState>(&mut sc);
+    let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+    let id = auction::submit_intent_with_price_for_testing<TOKA, TOKB>(
+        &mut state,
+        &cfg,
+        h::mint<TOKA>(10_000, ts::ctx(&mut sc)),
+        19_000,
+        MID,
+        500,
+        true,
+        false,
+        DEADLINE,
+        &clock,
+        ts::ctx(&mut sc),
+    );
+    ts::return_shared(cfg);
+    ts::return_shared(state);
+
+    ts::next_tx(&mut sc, SOLVER);
+    let mut state = ts::take_shared<AuctionState>(&mut sc);
+    let cfg = ts::take_shared<GlobalConfig>(&mut sc);
+    let mut registry = ts::take_shared<SolverRegistry<SUI>>(&mut sc);
+    let mut vault = ts::take_shared<FeeVault<TOKB>>(&mut sc);
+    let intent = ts::take_shared_by_id<Intent<TOKA, TOKB>>(&mut sc, id);
+    let mut auth = settlement::authorize_for_testing<TOKA, TOKB>(
+        &state,
+        b"tokb-solution",
+        SOLVER,
+        vector[id],
+        vector[10_000],
+        vector[20_000],
+        vector[19_000],
+    );
+    let (sell_coin, receipt) =
+        settlement::take_authorized_intent_full(&mut state, &mut auth, intent, &clock, ts::ctx(&mut sc));
+    h::burn(sell_coin);
+    settlement::settle_intent(
+        &mut state,
+        &mut registry,
+        &cfg,
+        &mut vault,
+        receipt,
+        h::mint<TOKB>(20_000, ts::ctx(&mut sc)),
+        ts::ctx(&mut sc),
+    );
+    ts::return_shared(vault);
+    ts::return_shared(registry);
+    ts::return_shared(cfg);
+    ts::return_shared(state);
+
+    ts::next_tx(&mut sc, USER);
+    let payout = ts::take_from_sender<Coin<TOKB>>(&mut sc);
+    assert!(payout.value() == 19_979, 0);
+    h::burn(payout);
+
+    ts::next_tx(&mut sc, SOLVER);
+    let solver_fee = ts::take_from_sender<Coin<TOKB>>(&mut sc);
+    assert!(solver_fee.value() == 7, 1);
+    h::burn(solver_fee);
+
+    ts::next_tx(&mut sc, ADMIN);
+    let vault = ts::take_shared<FeeVault<TOKB>>(&mut sc);
+    assert!(fee_vault::balance(&vault) == 14, 2);
+    ts::return_shared(vault);
+
+    clock.destroy_for_testing();
+    ts::end(sc);
+}
+
+#[test]
 fun test_valid_certificate_settles_partial_intent_and_advances_target_epoch() {
     let mut sc = ts::begin(ADMIN);
     h::setup_all(&mut sc, ADMIN);
@@ -155,7 +241,7 @@ fun test_valid_certificate_settles_partial_intent_and_advances_target_epoch() {
         settlement::take_authorized_intent_partial(&mut state, &mut auth, &mut intent, &clock, ts::ctx(&mut sc));
     assert!(sell_coin.value() == 400, 0);
     h::burn(sell_coin);
-    settlement::settle_intent_numeraire(
+    settlement::settle_intent(
         &mut state,
         &mut registry,
         &cfg,
@@ -321,7 +407,7 @@ fun test_wrong_epoch_aborts() {
     let (sell_coin, receipt) =
         settlement::take_authorized_intent_full(&mut state, &mut auth, intent, &clock, ts::ctx(&mut sc));
     h::burn(sell_coin);
-    settlement::settle_intent_numeraire(
+    settlement::settle_intent(
         &mut state,
         &mut registry,
         &cfg,
@@ -367,7 +453,7 @@ fun test_tampered_protected_min_aborts() {
     let (sell_coin, receipt) =
         settlement::take_authorized_intent_full(&mut state, &mut auth, intent, &clock, ts::ctx(&mut sc));
     h::burn(sell_coin);
-    settlement::settle_intent_numeraire(
+    settlement::settle_intent(
         &mut state,
         &mut registry,
         &cfg,
