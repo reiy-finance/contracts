@@ -1,9 +1,9 @@
 # Reiy Protocol — Move Contracts
 
-On-chain intent escrow and certificate-based settlement for the Reiy intent DEX on Sui. Bid
-collection, scoring, and winner selection run off-chain in the **Execution Coordinator**; the chain
-escrows user funds, verifies the Coordinator's signed solution, enforces each user's protection, and
-splits fees. Move 2024, DeepBook v3.
+On-chain intent escrow and certificate-based settlement for the Reiy intent DEX on Sui. Quote
+collection, solve orchestration, scoring, and winner selection run off-chain in the **Execution
+Coordinator**; the chain escrows user funds, verifies the Coordinator's signed solution, enforces
+each user's protection, and splits fees. Move 2024, DeepBook v3.
 
 > Solver integrators: see [SOLVERS.md](SOLVERS.md) for the settlement call sequence.
 
@@ -18,8 +18,8 @@ sequenceDiagram
 
     User->>Chain: submit_intent (escrow Sell)
     Chain-->>Coord: IntentCreatedEvent
-    Solver->>Coord: bid
-    Coord->>Coord: score + select winner
+    Solver->>Coord: quote / solve response
+    Coord->>Coord: validate + select winner
     Coord-->>Solver: Ed25519-signed SolutionMessage
     rect rgb(238, 244, 255)
     note over Solver,Chain: one PTB
@@ -34,8 +34,8 @@ sequenceDiagram
 | Layer | Responsibility |
 | --- | --- |
 | On-chain | Intent escrow, certificate verification, payout-floor enforcement, fee split, settlement events. |
-| Off-chain (Coordinator) | Bid intake, scoring, winner selection, certificate signing + reissue on solver timeout. |
-| Solver | Bid to the Coordinator; on win, source liquidity and settle the signed solution on-chain. |
+| Off-chain (Coordinator) | Quote/solution intake, scoring, winner selection, certificate signing + reissue on solver timeout. |
+| Solver | Respond to the Coordinator; on win, source liquidity and settle the signed solution on-chain. |
 
 ## Modules
 
@@ -45,7 +45,7 @@ sequenceDiagram
 | `intent_book` | `Intent<Sell, Buy>` shared object: SBBO-gated creation, escrow, partial-fill, cancel. |
 | `auction` | Slim `AuctionState` (shared): epoch counter, per-epoch partial-fill set, fee totals. |
 | `settlement` | Certificate verification + per-intent settlement, fee split, user protection. |
-| `solver_registry` | `SolverRegistry<Stake>` (shared): solver bond + active status. |
+| `solver_registry` | `SolverRegistry<Stake>` (shared): solver stake + active status. |
 | `fee_vault` | `FeeVault<T>` (shared): per-token protocol fee balance. |
 | `price_adapter` | DeepBook mid-price reader + SBBO helper math. |
 | `events`, `math`, `types` | Event structs, fixed-point helpers, `PairKey`. |
@@ -57,7 +57,7 @@ sequenceDiagram
 | `GlobalConfig` | shared | One per deployment. All mutations require `AdminCap`. |
 | `AdminCap` | owned | Held by deployer; transfer to multisig for mainnet. |
 | `AuctionState` | shared | Protocol state; pinned by `SolutionMessage.protocol_state_id`. |
-| `SolverRegistry<Stake>` | shared | Solver bonds; `Stake` is the bond coin type. |
+| `SolverRegistry<Stake>` | shared | Solver stake; `Stake` is the eligibility coin type. |
 | `FeeVault<T>` | shared | Canonical fee sink for token `T`, registered in config. |
 | `Intent<Sell, Buy>` | shared | Holds escrowed `Sell`; source of truth for one user order. |
 
@@ -88,6 +88,13 @@ parallel `intent_ids` / `fills` / `gross_payouts` / `protected_mins`, plus `expi
 `verify_solution` (checks signature, sender, epoch, token types, expiry) → `SolutionAuth` hot-potato →
 `take_authorized_intent_full|partial` per intent in order → deliver `payout: Coin<Buy>` via
 `settle_intent`. Full sequence in [SOLVERS.md](SOLVERS.md).
+
+There is no on-chain settlement phase gate in the hybrid model. Once an intent exists and the
+Coordinator has signed a valid certificate for the current epoch, the solver may settle immediately.
+Quote windows, batching windows, retries, and winner timing are Coordinator policy, not contract
+state. `auction::advance_epoch` only increments the epoch after `min_batch_collect_ms`; a certificate
+for the new epoch cannot settle an older intent because `take_authorized_intent_*` enforces
+`intent.target_epoch == certificate.epoch`.
 
 ## User protections (enforced on-chain)
 
@@ -136,8 +143,9 @@ solver_registry::withdraw_available_stake<Stake>(registry, amount, ctx)
 solver_registry::deregister_solver<Stake>(registry, ctx): Coin<Stake>
 ```
 
-A solver is *active* (may settle) while registered with `stake ≥ min_solver_stake`. The bond is a
-passive eligibility deposit; orchestration and any penalties are handled by the Coordinator.
+A solver is *active* (may settle) while registered with `stake ≥ min_solver_stake`. The stake is a
+passive eligibility deposit in the current contract; reservations, penalties, and retries are handled
+by the Coordinator.
 
 ## Configuration & administration
 
@@ -176,8 +184,9 @@ See `scripts/setup.sh` and `.env.{testnet,mainnet}.example`.
 ## Trust model
 
 Users are protected on-chain by minimum output, SBBO floor, deadline, token-type, epoch, and
-certificate checks. Best execution depends on the (operationally trusted) Coordinator and the solver
-market in v1; future work may add optimistic challenges or multi-coordinator signatures.
+certificate checks. Best execution and response-window policy depend on the operationally trusted
+Coordinator and the solver market in v1; future work may add optimistic challenges or
+multi-coordinator signatures.
 
 ## Launch constraints
 

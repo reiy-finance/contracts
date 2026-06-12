@@ -1,16 +1,16 @@
 # Reiy — Solver Integration Guide
 
 Concise reference for building a solver against the Reiy Move package. Hybrid model: intents escrow
-on-chain, the off-chain **Execution Coordinator** scores bids and signs the winning solution, and the
-**solver** atomically settles it on-chain.
+on-chain, the off-chain **Execution Coordinator** scores solver responses and signs the winning
+solution, and the **solver** atomically settles it on-chain.
 
 ## 1. Roles
 
 | Role | Where | Responsibility |
 | --- | --- | --- |
 | User | on-chain | Submits an `Intent<Sell, Buy>` escrowing the sell asset + a protected minimum. |
-| Execution Coordinator | off-chain | Collects bids, selects + Ed25519-signs one `SolutionMessage` per solver. |
-| **Solver (you)** | off-chain + on-chain | Bid to the Coordinator; on win, source liquidity and settle the signed solution in one PTB. |
+| Execution Coordinator | off-chain | Collects quotes/solutions, selects + Ed25519-signs one `SolutionMessage` per solver. |
+| **Solver (you)** | off-chain + on-chain | Respond to the Coordinator; on win, source liquidity and settle the signed solution in one PTB. |
 
 ## 2. Prerequisites
 
@@ -65,6 +65,12 @@ settlement::settle_intent<Sell, Buy, Stake>(
 `take_*` advance `auth` sequentially: intent `i` must equal `intent_ids[i]`. Settle each receipt in
 the same PTB.
 
+Settlement can happen immediately after the Coordinator issues a valid certificate. The contract has
+no separate on-chain settlement phase gate; `auction::phase_code()` is a compatibility getter that
+always reports `0`. Fisherman decides quote windows, batching windows, and retry policy off-chain.
+The contract still enforces epoch safety: the signed epoch is the live `AuctionState.current_epoch`,
+and each intent must have `target_epoch == epoch`.
+
 ## 5. Invariants you must satisfy
 
 - `payout.value() == gross_payout` for that intent (exact).
@@ -93,7 +99,7 @@ User receives `net = gross − total_fee`.
 
 | Event | When |
 | --- | --- |
-| `IntentCreatedEvent` | New intent available to bid on. |
+| `IntentCreatedEvent` | New intent available to solve. |
 | `SolutionAuthorizedEvent` | A solution passed `verify_solution`. |
 | `SettlementEvent`, `SettlementFeeChargedEvent` | Per-intent settlement + fee breakdown. |
 | `SolverFeePaidEvent` | Your fee share paid. |
